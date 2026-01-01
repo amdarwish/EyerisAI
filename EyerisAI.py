@@ -1,3 +1,4 @@
+
 # EyerisAI.py   
 # Standard library imports
 import base64
@@ -11,11 +12,27 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+from my_agent import run_agent
 # Third-party imports
 import cv2
 import numpy as np
 import pyttsx3
 import requests
+
+def is_mostly_gray(frame, gray_threshold=0.5, tolerance=10):
+    """
+    Returns True if more than `gray_threshold` fraction of the frame's pixels are gray (R≈G≈B within `tolerance`).
+    """
+    if frame is None:
+        return True
+    arr = np.asarray(frame)
+    if len(arr.shape) == 3 and arr.shape[2] == 3:
+        diff_rg = np.abs(arr[:,:,0] - arr[:,:,1])
+        diff_gb = np.abs(arr[:,:,1] - arr[:,:,2])
+        gray_pixels = (diff_rg < tolerance) & (diff_gb < tolerance)
+        gray_fraction = np.sum(gray_pixels) / (arr.shape[0] * arr.shape[1])
+        return gray_fraction > gray_threshold
+    return False
 
 def load_config():
     """
@@ -36,15 +53,21 @@ def load_config():
         'ai': {
             'base_url': config.get('AI', 'base_url'),
             'model': config.get('AI', 'model'),
+            'agent_model': config.get('AI', 'agent_model', fallback=None),
             'prompt': config.get('AI', 'prompt'),
             'api_key': config.get('AI', 'api_key', fallback=None),  # Optional for Ollama
-            'max_tokens': config.getint('AI', 'max_tokens', fallback=300)
+            'max_tokens': config.getint('AI', 'max_tokens', fallback=300),
+            # Optional motion prompt to describe motion across multiple frames
+            'motion_prompt': config.get('AI', 'motion_prompt', fallback=config.get('AI', 'prompt'))
         },
         'camera': {
-            'device_id': config.getint('Camera', 'device_id'),
-            'width': config.getint('Camera', 'width'),
-            'height': config.getint('Camera', 'height'),
-            'auto_exposure': config.getfloat('Camera', 'auto_exposure'),
+            # If use_ip is True, the IP camera URL in 'ip_url' will be used instead of the local device id
+            'use_ip': config.getboolean('Camera', 'use_ip', fallback=False),
+            'ip_url': config.get('Camera', 'ip_url', fallback=''),
+            'device_id': config.getint('Camera', 'device_id', fallback=0),
+            'width': config.getint('Camera', 'width', fallback=640),
+            'height': config.getint('Camera', 'height', fallback=480),
+            'auto_exposure': config.getfloat('Camera', 'auto_exposure', fallback=0.75),
         },
         'motion_detection': {
             'min_area': config.getint('MotionDetection', 'min_area'),
@@ -54,7 +77,11 @@ def load_config():
             ),
             'threshold': config.getint('MotionDetection', 'threshold'),
             'cooldown': config.getint('MotionDetection', 'cooldown'),
-        },
+            # Number of frames to capture when motion is detected
+            'n_frames': config.getint('MotionDetection', 'n_frames', fallback=5),
+            # Seconds between captured frames
+            'frames_interval': config.getfloat('MotionDetection', 'frames_interval', fallback=0.5),
+         },
         'tts': {
             'enabled': config.getboolean('TTS', 'enabled'),
             'rate': config.getint('TTS', 'rate'),
@@ -87,12 +114,16 @@ def adjust_camera_settings(cap):
     Adjust camera settings based on configuration
     """
     print("Adjusting camera settings...")
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, CONFIG['camera']['auto_exposure'])
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG['camera']['width'])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG['camera']['height'])
-    print(f"Camera resolution: {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
+    # For IP cameras, setting hardware properties usually has no effect; skip those.
+    if not CONFIG['camera'].get('use_ip', False):
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, CONFIG['camera']['auto_exposure'])
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG['camera']['width'])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG['camera']['height'])
+        print(f"Camera resolution: {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
+    else:
+        print("Using IP camera; skipping hardware property adjustments.")
     
-    # Capture initial frames to allow camera to adjust exposure
+    # Capture initial frames to allow camera to adjust exposure / prime stream
     ret_val, _ = cap.read()
     ret_val, _ = cap.read()
 
@@ -151,7 +182,68 @@ def describe_image(image) -> str:
         return response.json()['choices'][0]['message']['content']
     else:
         raise Exception(f"API request failed: {response.text}")
+    
+def describe_frames(images: list) -> str:
+    """
+    Describe motion across multiple images. `images` is a list of raw JPEG bytes.
+    This function now sends only the first and last frame to the model and requests an English response.
+    """
+    api_config = CONFIG['ai']
 
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f"Bearer {api_config['api_key']}"
+    }
+
+    # Prepare a strong motion-focused prompt and require English output
+    motion_prompt = api_config.get('motion_prompt') or api_config.get('prompt')
+    motion_prompt = (
+        "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
+        "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
+        "Keep the answer as a single clear paragraph in English.\n\n"
+        + motion_prompt
+    )
+
+    # Ensure we have at least one image
+    if not images:
+        return "No frames to describe."
+
+    # Select only first and last frames
+    first_img = images[0]
+    last_img = images[-1] if len(images) > 1 else images[0]
+
+    # Build content: prompt + labelled first/last images
+    content_items = [
+        {'type': 'text', 'text': motion_prompt},
+        {'type': 'text', 'text': 'Frame 1 (first):'},
+        {'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{base64.b64encode(first_img).decode('utf-8')}"}},
+        {'type': 'text', 'text': f'Frame {len(images)} (last):'},
+        {'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{base64.b64encode(last_img).decode('utf-8')}"}}
+    ]
+
+    payload = {
+        'model': api_config['model'],
+        'messages': [
+            {
+                'role': 'user',
+                'content': content_items
+            }
+        ],
+        'max_tokens': api_config.get('max_tokens', 600)
+    }
+
+    response = requests.post(
+        f"{api_config['base_url']}/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+
+    if response.status_code == 200:
+        return response.json()['choices'][0]['message']['content']
+    else:
+        raise Exception(f"API request failed: {response.status_code} {response.text}")
+    
 def detect_motion(frame1, frame2):
     """
     Detect motion between two frames and return (motion_detected, contours)
@@ -218,14 +310,20 @@ def log_event(image_path, description):
     Log event details in JSONL format
     """
     log_file = CONFIG['save_directory'] + '/' + CONFIG['log_file']
+    camera_info = {
+        'resolution': f"{CONFIG['camera']['width']}x{CONFIG['camera']['height']}"
+    }
+    # Record camera identifier (device id or IP URL)
+    if CONFIG['camera'].get('use_ip', False):
+        camera_info['id'] = CONFIG['camera'].get('ip_url', '')
+    else:
+        camera_info['id'] = CONFIG['camera']['device_id']
+
     event = {
         'timestamp': datetime.now().isoformat(),
         'image_path': str(image_path),
         'description': description,
-        'camera': {
-            'id': CONFIG['camera']['device_id'],
-            'resolution': f"{CONFIG['camera']['width']}x{CONFIG['camera']['height']}"
-        },
+        'camera': camera_info,
         'motion_detection': {
             'min_area': CONFIG['motion_detection']['min_area'],
             'threshold': CONFIG['motion_detection']['threshold']
@@ -239,44 +337,92 @@ def log_event(image_path, description):
     
     return event
 
-def send_email_alert(image_path, description, timestamp):
+def ask_agent_should_alert(description: str) -> bool:
     """
-    Send email alert with image and description
+    Use the configured AI to decide whether the event description indicates a person.
+    Returns True if email should be sent (person detected), False otherwise.
+    This function tries to parse a JSON response from the LLM; falls back to keyword checking.
     """
-    if not CONFIG['email']['enabled']:
-        return
+    api_config = CONFIG['ai']
+    agent_model = api_config.get('AI', api_config.get('agent_model'))
 
-    email_config = CONFIG['email']
-    
-    # Create the email message
-    msg = MIMEMultipart()
-    msg['Subject'] = f"{CONFIG['instance_name']} - Motion Detected at {timestamp}"
-    msg['From'] = email_config['from_address']
-    msg['To'] = email_config['to_address']
+    prompt = (
+        "You are an automated security agent. Given the description below, decide whether this event involves a person or human activity and whether an email alert should be sent.\n\n"
+        f"Description:\n{description}\n\n"
+        "Answer in strict JSON with keys: {\n  \"alert\": true|false,\n  \"reason\": \"short explanation\"\n}\n"
+        "Return only the JSON object and nothing else."
+    )
 
-    # Add description as text
-    text = MIMEText(f"Motion Detection Alert\n\nTime: {timestamp}\n\nDescription: {description}")
-    msg.attach(text)
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f"Bearer {api_config['api_key']}"
+    }
 
-    # Add image attachment
-    with open(image_path, 'rb') as f:
-        img = MIMEImage(f.read())
-        img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
-        msg.attach(img)
+    payload = {
+        'model': agent_model,
+        'messages': [
+            {'role': 'user', 'content': prompt}
+        ],
+        'max_tokens': 200
+    }
 
-    # Send the email
     try:
-        with smtplib.SMTP(email_config['smtp_server'], email_config['smtp_port']) as server:
-            if email_config['use_tls']:
-                server.starttls()
-            
-            if email_config['smtp_username'] and email_config['smtp_password']:
-                server.login(email_config['smtp_username'], email_config['smtp_password'])
-            
-            server.send_message(msg)
-            print(f"Email alert sent to {email_config['to_address']}")
+        resp = requests.post(f"{api_config['base_url']}/v1/chat/completions", headers=headers, json=payload, timeout=15)
+        if resp.status_code != 200:
+            print(f"Agent request failed: {resp.status_code} {resp.text}")
+            # fallback to keyword check
+            return ('person' in description.lower() or 'human' in description.lower())
+
+        text = resp.json()['choices'][0]['message']['content']
+
+        # Try to extract JSON from the model output
+        try:
+            # Sometimes model returns extra text; extract the first JSON object
+            import re
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+            else:
+                data = json.loads(text)
+
+            return bool(data.get('alert'))
+        except Exception:
+            # Fallback simple heuristic
+            return ('person' in text.lower() or 'human' in text.lower())
+
     except Exception as e:
-        print(f"Failed to send email alert: {str(e)}")
+        print(f"Agent call error: {e}")
+        return ('person' in description.lower() or 'human' in description.lower())
+
+
+def agent_decide_and_send(description: str, frames_bytes: list, image_path: str, timestamp: str):
+    """
+    Agent wrapper: delegate decision to the Agent in my_agent.run_agent. The agent
+    itself will call the send_email_alert_tool if it decides to send an alert.
+    This function invokes the agent and prints the final decision. Falls back to
+    the simple LLM decisioner on any import/runtime error.
+    """
+    try:
+        # run_agent returns True if an email was sent (or requested and sent), False otherwise
+        sent = run_agent(description, frames_bytes, image_path, timestamp)
+        if sent:
+            print("Agent decided to send email and email was sent.")
+        else:
+            print("Agent decided NOT to send email: no human present.")
+    except Exception as e:
+        print(f"Agent invocation failed: {e}. Falling back to simple LLM decision.")
+        # Fallback: use the original lightweight decision function
+        try:
+            should_send = ask_agent_should_alert(description)
+            if should_send:
+                # call the legacy email sender directly with up to 6 frames
+                from my_agent import send_email_alert_tool
+                send_email_alert_tool(image_path=str(image_path), description=description, timestamp=timestamp, frames_bytes=frames_bytes[:6])
+                print("Fallback: Sent email based on simple LLM/heuristic decision.")
+            else:
+                print("Fallback: Decided not to send email.")
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
 
 def run_motion_detection():
     """
@@ -286,15 +432,48 @@ def run_motion_detection():
     save_dir = Path(CONFIG['save_directory'])
     save_dir.mkdir(exist_ok=True)
 
-    # Access the webcam
-    cap = cv2.VideoCapture(CONFIG['camera']['device_id'])
+    # Determine video source (IP URL or local device)
+    cam_cfg = CONFIG['camera']
+    if cam_cfg.get('use_ip', False):
+        source = cam_cfg.get('ip_url')
+    else:
+        source = cam_cfg.get('device_id')
+
+    # Access the video source
+    cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
     adjust_camera_settings(cap)
 
     if not cap.isOpened():
-        raise IOError("Cannot open webcam")
+        # For IP streams it's often useful to retry; do a few attempts for robustness
+        if cam_cfg.get('use_ip', False):
+            print(f"Failed to open IP camera stream '{source}'. Retrying for 10 seconds...")
+            start = time.time()
+            while time.time() - start < 10:
+                time.sleep(1)
+                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+                if cap.isOpened():
+                    print("Reconnected to IP camera stream.")
+                    break
+        if not cap.isOpened():
+            raise IOError("Cannot open video source: {}".format(source))
 
     # Read two initial frames
-    _, frame1 = cap.read()
+    ret, frame1 = cap.read()
+    if not ret or frame1 is None:
+        print("Warning: failed to read initial frame from video source. Attempting up to 5 reconnects...")
+        reconnect_attempts = 0
+        max_reconnect = 5
+        while reconnect_attempts < max_reconnect and (not (cap.isOpened() and ret)):
+            time.sleep(1)
+            cap.release()
+            cap = cv2.VideoCapture(source)
+            adjust_camera_settings(cap)
+            ret, frame1 = cap.read()
+            reconnect_attempts += 1
+
+        if not ret or frame1 is None:
+            print("Warning: unable to read initial frame after reconnect attempts. The loop will start and will try to recover on reads.")
+            frame1 = None
     last_detection_time = 0
 
     print("Motion detection started. Press Ctrl+C to stop.")
@@ -302,12 +481,53 @@ def run_motion_detection():
     try:
         while True:
             # Read current frame
-            _, frame2 = cap.read()
-            
-            current_time = time.time()
+            ret, frame2 = cap.read()
+            if not ret or frame2 is None:
+                print("Warning: failed to read frame from video source.")
+                # If using IP camera, try reconnecting up to 5 times then skip iteration
+                if cam_cfg.get('use_ip', False):
+                    reconnect_attempts = 0
+                    max_reconnect = 5
+                    reconnected = False
+                    while reconnect_attempts < max_reconnect:
+                        time.sleep(1)
+                        cap.release()
+                        cap = cv2.VideoCapture(source)
+                        adjust_camera_settings(cap)
+                        ret, frame2 = cap.read()
+                        if ret and frame2 is not None:
+                            reconnected = True
+                            print("Reconnected to video source.")
+                            break
+                        reconnect_attempts += 1
+
+                    if not reconnected:
+                        print("Reconnect attempts failed; skipping this iteration.")
+                        time.sleep(0.5)
+                        continue
+                else:
+                    time.sleep(0.5)
+                    continue
+
+            # Ensure we have a previous frame to compare against
+            if frame1 is None:
+                frame1 = frame2.copy()
+                # Not enough frames yet to detect motion
+                time.sleep(0.1)
+                continue
+
+            # Skip motion detection if either frame is mostly gray
+            if is_mostly_gray(frame1) or is_mostly_gray(frame2):
+                # Optionally print or log this event
+                # print("Skipped frame: mostly gray (likely corrupted or blank)")
+                frame1 = frame2.copy()
+                time.sleep(0.1)
+                continue
+
             motion_detected, contours = detect_motion(frame1, frame2)
             
             if motion_detected:
+                current_time = time.time()
                 # Check if enough time has passed since last detection
                 if current_time - last_detection_time > CONFIG['motion_detection']['cooldown']:
                     print("Motion detected!")
@@ -316,15 +536,84 @@ def run_motion_detection():
                     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                     filename = f"capture_{timestamp}.png"
                     image_path = save_dir / filename
+                    last_detection_time = current_time
 
                     # Draw detection information on the frame
                     annotated_frame = draw_detection_info(frame2, contours, timestamp)
 
                     # Save the annotated image
-                    cv2.imwrite(str(image_path), annotated_frame)
-                    im = open(image_path, 'rb').read()
+                    # cv2.imwrite(str(image_path), annotated_frame)
+                    # Capture a burst of frames (frame2 + N-1 more) at configured intervals
+                    n_frames = int(CONFIG['motion_detection']['n_frames'])
+                    frames_interval = float(CONFIG['motion_detection']['frames_interval'])
+
+                    frames_bytes = []
+                    # Include the previous frame (frame1) as the first attachment if available
+                    if frame1 is not None:
+                        _, jpg = cv2.imencode('.jpg', frame1)
+                        frames_bytes.append(jpg.tobytes())
+
+                    # Then include the current frame (frame2)
+                    _, jpg = cv2.imencode('.jpg', frame2)
+                    frames_bytes.append(jpg.tobytes())
+
+                    # Poll for N-1 additional frames; prefer frames that differ from the last captured frame
+                    last_captured_frame = frame2.copy()
+                    # mean-difference threshold for accepting a new frame (tunable)
+                    diff_threshold = 5.0
+
+                    for i in range(max(0, n_frames - 1)):
+                        start_poll = time.time()
+                        captured = False
+                        candidate = None
+
+                        # Poll until we find a sufficiently different frame or we exceed frames_interval
+                        while time.time() - start_poll < frames_interval:
+                            ret_extra, candidate = cap.read()
+                            if not ret_extra or candidate is None:
+                                # Try a quick reconnect single attempt and continue polling
+                                cap.release()
+                                cap = cv2.VideoCapture(source)
+                                adjust_camera_settings(cap)
+                                ret_extra, candidate = cap.read()
+                                if not ret_extra or candidate is None:
+                                    time.sleep(0.05)
+                                    continue
+
+                            try:
+                                gray_last = cv2.cvtColor(last_captured_frame, cv2.COLOR_BGR2GRAY)
+                                gray_cand = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+                                mean_diff = float(np.mean(cv2.absdiff(gray_cand, gray_last)))
+                            except Exception:
+                                mean_diff = 255.0
+
+                            if mean_diff > diff_threshold:
+                                captured = True
+                                break
+                            # small sleep to avoid tight loop
+                            time.sleep(0.05)
+
+                        if not captured:
+                            # fallback: if we read any candidate frame use it, else skip
+                            if candidate is None:
+                                print(f"Warning: failed to capture extra frame {i+1}; skipping")
+                                continue
+                            else:
+                                frame_extra = candidate
+                        else:
+                            frame_extra = candidate
+
+                        # Append encoded JPEG bytes and update last_captured_frame for next iteration
+                        _, jpg = cv2.imencode('.jpg', frame_extra)
+                        frames_bytes.append(jpg.tobytes())
+                        last_captured_frame = frame_extra.copy()
+
                     if CONFIG['ai_description']:
-                        description = describe_image(im)
+                        try:
+                            description = describe_frames(frames_bytes)
+                        except Exception as e:
+                            print(f"AI description failed: {e}")
+                            description = "Motion detected"
                     else:
                         description = "Motion detected"
 
@@ -337,10 +626,9 @@ def run_motion_detection():
                     if CONFIG['tts']['enabled']:
                         tts(description)
                     
-                    # Send email alert if enabled
-                    send_email_alert(str(image_path), description, timestamp)
+                    # Use agent to decide whether to send email (agent will call send_email_alert tool)
+                    agent_decide_and_send(description, frames_bytes, str(image_path), timestamp)
                     
-                    last_detection_time = current_time
             
             # Update frame1
             frame1 = frame2.copy()
