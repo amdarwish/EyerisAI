@@ -1,4 +1,3 @@
-
 # EyerisAI.py   
 # Standard library imports
 import base64
@@ -18,6 +17,70 @@ import cv2
 import numpy as np
 import pyttsx3
 import requests
+
+# --- Item Counting Function ---
+def count_items(image_path: str, item_name: str):
+    """
+    Count the number of specified items in an image using the configured AI model.
+    """
+    import cv2
+    import base64
+    import requests
+    # Load image
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"Failed to load image: {image_path}")
+        return
+    # Encode as JPEG
+    success, img_bytes = cv2.imencode('.jpg', image)
+    if not success:
+        print("Failed to encode image as JPEG.")
+        return
+    img_b64 = base64.b64encode(img_bytes.tobytes()).decode('utf-8')
+    # Prepare prompt
+    prompt = (
+        f"You are an expert visual counter. Count how many '{item_name}' are present in the image. "
+        f"Return ONLY a valid JSON object with a single key: \"count\" (integer). "
+        f"If the item is not present, return {{\"count\": 0}}. Do not include any explanation. "
+        f"Use double quotes for all keys and string values. Ensure all commas and brackets are correct so the output parses as valid JSON. Do not add any text before or after the JSON object."
+    )
+    api_config = CONFIG['ai']
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    if api_config.get('api_key'):
+        headers['Authorization'] = f"Bearer {api_config['api_key']}"
+    payload = {
+        'model': api_config['model'],
+        'messages': [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': prompt},
+                    {'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{img_b64}"}}
+                ]
+            }
+        ],
+        'max_tokens': 100
+    }
+    try:
+        response = requests.post(f"{api_config['base_url']}/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content']
+            import re, json as pyjson
+            m = re.search(r'\{[\s\S]*\}', content)
+            if m:
+                result = pyjson.loads(m.group(0))
+                count = result.get('count', None)
+                print(f"Counted {count} '{item_name}' in the image.")
+            else:
+                print("Could not parse count from model response:", content)
+        else:
+            print(f"API request failed: {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"Error during counting: {e}")
+
+
 
 def is_mostly_gray(frame, gray_threshold=0.5, tolerance=10):
     """
@@ -642,4 +705,17 @@ def run_motion_detection():
         cap.release()
 
 if __name__ == "__main__":
-    run_motion_detection()
+    import argparse
+    parser = argparse.ArgumentParser(description="EyerisAI: Motion Detection and Item Counting")
+    parser.add_argument('--use-case', choices=['motion', 'count'], default='motion', help='Which use case to run: motion or count')
+    parser.add_argument('--image', type=str, help='Path to image file (required for count)')
+    parser.add_argument('--item', type=str, help='Name of the item to count (required for count)')
+    args = parser.parse_args()
+
+    if args.use_case == 'motion':
+        run_motion_detection()
+    elif args.use_case == 'count':
+        if not args.image or not args.item:
+            print("For counting, you must provide --image and --item arguments.")
+        else:
+            count_items(args.image, args.item)
