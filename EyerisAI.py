@@ -11,7 +11,7 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from my_agent import run_agent
+from my_agent import run_motion_agent, run_qa_agent
 # Third-party imports
 import cv2
 import numpy as np
@@ -246,10 +246,9 @@ def describe_image(image) -> str:
     else:
         raise Exception(f"API request failed: {response.text}")
     
-def describe_frames(images: list) -> str:
+def describe_frames(images: list, prompt_text: str) -> str:
     """
-    Describe motion across multiple images. `images` is a list of raw JPEG bytes.
-    This function now sends only the first and last frame to the model and requests an English response.
+    Describe frames using the provided prompt. `images` is a list of raw JPEG bytes.
     """
     api_config = CONFIG['ai']
 
@@ -258,31 +257,17 @@ def describe_frames(images: list) -> str:
         'Authorization': f"Bearer {api_config['api_key']}"
     }
 
-    # Prepare a strong motion-focused prompt and require English output
-    motion_prompt = api_config.get('motion_prompt') or api_config.get('prompt')
-    motion_prompt = (
-        "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
-        "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
-        "Keep the answer as a single clear paragraph in English.\n\n"
-        + motion_prompt
-    )
-
     # Ensure we have at least one image
     if not images:
         return "No frames to describe."
 
-    # Select only first and last frames
-    first_img = images[0]
-    last_img = images[-1] if len(images) > 1 else images[0]
-
-    # Build content: prompt + labelled first/last images
+    # Build content: prompt + all frames, each labeled
     content_items = [
-        {'type': 'text', 'text': motion_prompt},
-        {'type': 'text', 'text': 'Frame 1 (first):'},
-        {'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{base64.b64encode(first_img).decode('utf-8')}"}},
-        {'type': 'text', 'text': f'Frame {len(images)} (last):'},
-        {'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{base64.b64encode(last_img).decode('utf-8')}"}}
+        {'type': 'text', 'text': prompt_text}
     ]
+    for idx, img in enumerate(images):
+        content_items.append({'type': 'text', 'text': f'Frame {idx+1}:'})
+        content_items.append({'type': 'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{base64.b64encode(img).decode('utf-8')}"}})
 
     payload = {
         'model': api_config['model'],
@@ -292,14 +277,14 @@ def describe_frames(images: list) -> str:
                 'content': content_items
             }
         ],
-        'max_tokens': api_config.get('max_tokens', 600)
+        'max_tokens': api_config.get('max_tokens', 10000)
     }
 
     response = requests.post(
         f"{api_config['base_url']}/v1/chat/completions",
         headers=headers,
         json=payload,
-        timeout=60
+        timeout=240
     )
 
     if response.status_code == 200:
@@ -458,27 +443,27 @@ def ask_agent_should_alert(description: str) -> bool:
         return ('person' in description.lower() or 'human' in description.lower())
 
 
-def agent_decide_and_send(description: str, frames_bytes: list, image_path: str, timestamp: str):
+def agent_decide_and_send(description: str, frames_bytes: list, image_path: str, timestamp: str, use_case: str = 'motion'):
     """
-    Agent wrapper: delegate decision to the Agent in my_agent.run_agent. The agent
-    itself will call the send_email_alert_tool if it decides to send an alert.
-    This function invokes the agent and prints the final decision. Falls back to
-    the simple LLM decisioner on any import/runtime error.
+    Agent wrapper: delegate decision to the Agent in my_agent.run_motion_agent or run_qa_agent.
+    The agent itself will call the send_email_alert_tool if it decides to send an alert.
+    This function invokes the agent and prints the final decision. Falls back to the simple LLM decisioner on any import/runtime error.
+    use_case: 'motion' or 'qa'
     """
     try:
-        # run_agent returns True if an email was sent (or requested and sent), False otherwise
-        sent = run_agent(description, frames_bytes, image_path, timestamp)
+        if use_case == 'qa':
+            sent = run_qa_agent(description, frames_bytes, image_path, timestamp)
+        else:
+            sent = run_motion_agent(description, frames_bytes, image_path, timestamp)
         if sent:
             print("Agent decided to send email and email was sent.")
         else:
-            print("Agent decided NOT to send email: no human present.")
+            print("Agent decided NOT to send email.")
     except Exception as e:
         print(f"Agent invocation failed: {e}. Falling back to simple LLM decision.")
-        # Fallback: use the original lightweight decision function
         try:
             should_send = ask_agent_should_alert(description)
             if should_send:
-                # call the legacy email sender directly with up to 6 frames
                 from my_agent import send_email_alert_tool
                 send_email_alert_tool(image_path=str(image_path), description=description, timestamp=timestamp, frames_bytes=frames_bytes[:6])
                 print("Fallback: Sent email based on simple LLM/heuristic decision.")
@@ -625,55 +610,64 @@ def run_motion_detection():
                     # mean-difference threshold for accepting a new frame (tunable)
                     diff_threshold = 5.0
 
-                    for i in range(max(0, n_frames - 1)):
-                        start_poll = time.time()
-                        captured = False
-                        candidate = None
+                    # for i in range(max(0, n_frames - 1)):
+                    #     start_poll = time.time()
+                    #     captured = False
+                    #     candidate = None
 
-                        # Poll until we find a sufficiently different frame or we exceed frames_interval
-                        while time.time() - start_poll < frames_interval:
-                            ret_extra, candidate = cap.read()
-                            if not ret_extra or candidate is None:
-                                # Try a quick reconnect single attempt and continue polling
-                                cap.release()
-                                cap = cv2.VideoCapture(source)
-                                adjust_camera_settings(cap)
-                                ret_extra, candidate = cap.read()
-                                if not ret_extra or candidate is None:
-                                    time.sleep(0.05)
-                                    continue
+                    #     # Poll until we find a sufficiently different frame or we exceed frames_interval
+                    #     while time.time() - start_poll < frames_interval:
+                    #         ret_extra, candidate = cap.read()
+                    #         if not ret_extra or candidate is None:
+                    #             # Try a quick reconnect single attempt and continue polling
+                    #             cap.release()
+                    #             cap = cv2.VideoCapture(source)
+                    #             adjust_camera_settings(cap)
+                    #             ret_extra, candidate = cap.read()
+                    #             if not ret_extra or candidate is None:
+                    #                 time.sleep(0.05)
+                    #                 continue
 
-                            try:
-                                gray_last = cv2.cvtColor(last_captured_frame, cv2.COLOR_BGR2GRAY)
-                                gray_cand = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
-                                mean_diff = float(np.mean(cv2.absdiff(gray_cand, gray_last)))
-                            except Exception:
-                                mean_diff = 255.0
+                    #         try:
+                    #             gray_last = cv2.cvtColor(last_captured_frame, cv2.COLOR_BGR2GRAY)
+                    #             gray_cand = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+                    #             mean_diff = float(np.mean(cv2.absdiff(gray_cand, gray_last)))
+                    #         except Exception:
+                    #             mean_diff = 255.0
 
-                            if mean_diff > diff_threshold:
-                                captured = True
-                                break
-                            # small sleep to avoid tight loop
-                            time.sleep(0.05)
+                    #         if mean_diff > diff_threshold:
+                    #             captured = True
+                    #             break
+                    #         # small sleep to avoid tight loop
+                    #         time.sleep(0.05)
 
-                        if not captured:
-                            # fallback: if we read any candidate frame use it, else skip
-                            if candidate is None:
-                                print(f"Warning: failed to capture extra frame {i+1}; skipping")
-                                continue
-                            else:
-                                frame_extra = candidate
-                        else:
-                            frame_extra = candidate
+                    #     if not captured:
+                    #         # fallback: if we read any candidate frame use it, else skip
+                    #         if candidate is None:
+                    #             print(f"Warning: failed to capture extra frame {i+1}; skipping")
+                    #             continue
+                    #         else:
+                    #             frame_extra = candidate
+                    #     else:
+                    #         frame_extra = candidate
 
-                        # Append encoded JPEG bytes and update last_captured_frame for next iteration
-                        _, jpg = cv2.imencode('.jpg', frame_extra)
-                        frames_bytes.append(jpg.tobytes())
-                        last_captured_frame = frame_extra.copy()
+                    #     # Append encoded JPEG bytes and update last_captured_frame for next iteration
+                    #     _, jpg = cv2.imencode('.jpg', frame_extra)
+                    #     frames_bytes.append(jpg.tobytes())
+                    #     last_captured_frame = frame_extra.copy()
 
                     if CONFIG['ai_description']:
                         try:
-                            description = describe_frames(frames_bytes)
+                            # Prepare motion prompt
+                            api_config = CONFIG['ai']
+                            motion_prompt = api_config.get('motion_prompt') or api_config.get('prompt')
+                            motion_prompt = (
+                                "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
+                                "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
+                                "Keep the answer as a single clear paragraph in English.\n\n"
+                                + motion_prompt
+                            )
+                            description = describe_frames(frames_bytes, motion_prompt)
                         except Exception as e:
                             print(f"AI description failed: {e}")
                             description = "Motion detected"
@@ -692,10 +686,29 @@ def run_motion_detection():
                     # Use agent to decide whether to send email (agent will call send_email_alert tool)
                     agent_decide_and_send(description, frames_bytes, str(image_path), timestamp)
                     
-            
-            # Update frame1
-            frame1 = frame2.copy()
-            
+                    # Flush camera buffer to ensure fresh frames - read and discard several frames
+                    print("Flushing camera buffer to start fresh...")
+                    flush_count = 10  # Number of frames to flush from buffer
+                    cap.release()
+                    cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+                    adjust_camera_settings(cap)
+                    for i in range(flush_count):
+                        ret_flush, _ = cap.read()
+                        if not ret_flush:
+                            # If flush fails, try reconnecting
+                            cap.release()
+                            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+                            adjust_camera_settings(cap)
+                            break
+                        time.sleep(0.02)  # Small delay between buffer flushes
+                    
+                    # Now capture completely fresh frames for next motion detection cycle
+                    ret_fresh1, frame1 = cap.read()
+                    if not ret_fresh1 or frame1 is None:
+                        print("Warning: failed to read fresh frame1 after agent processing")
+                        frame1 = frame2.copy()  # fallback to previous frame
+
+
             # Small delay to prevent high CPU usage
             time.sleep(0.1)
             
@@ -704,12 +717,16 @@ def run_motion_detection():
     finally:
         cap.release()
 
+
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="EyerisAI: Motion Detection and Item Counting")
-    parser.add_argument('--use-case', choices=['motion', 'count'], default='motion', help='Which use case to run: motion or count')
+    parser = argparse.ArgumentParser(description="EyerisAI: Motion Detection, Item Counting, and Video Analysis")
+    parser.add_argument('--use-case', choices=['motion', 'count', 'video'], default='motion', help='Which use case to run: motion, count, or video')
     parser.add_argument('--image', type=str, help='Path to image file (required for count)')
     parser.add_argument('--item', type=str, help='Name of the item to count (required for count)')
+    parser.add_argument('--video', type=str, help='Path to local video file (required for video mode)')
+    parser.add_argument('--n-frames', type=int, default=3, help='Number of frames to extract (video mode, default: 3)')
+    parser.add_argument('--interval', type=float, default=4.0, help='Interval in seconds to sample frames over (video mode, default: 10.0)')
     args = parser.parse_args()
 
     if args.use_case == 'motion':
@@ -719,3 +736,75 @@ if __name__ == "__main__":
             print("For counting, you must provide --image and --item arguments.")
         else:
             count_items(args.image, args.item)
+    elif args.use_case == 'video':
+        if not args.video:
+            print("For video mode, you must provide --video argument with the path to the video file.")
+        else:
+            from my_agent import run_qa_agent
+            def extract_and_describe_video_segments(video_path, n_frames, interval_sec):
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    print(f"Failed to open video file: {video_path}")
+                    return
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration = total_frames / fps if fps > 0 else 0
+                if fps <= 0 or total_frames <= 0:
+                    print("Invalid video file or unable to read FPS/frames.")
+                    cap.release()
+                    return
+                segment = 0
+                start_time = 0.0
+                while start_time < duration:
+                    frame_indices = [int((start_time + i * interval_sec / (n_frames - 1)) * fps) for i in range(n_frames)] if n_frames > 1 else [int(start_time * fps)]
+                    frames_bytes = []
+                    for frame_num, idx in enumerate(frame_indices):
+                        if idx >= total_frames:
+                            continue
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            print(f"Failed to read frame at index {idx}")
+                            continue
+                        success, jpg = cv2.imencode('.jpg', frame)
+                        if not success:
+                            print(f"Failed to encode frame at index {idx}")
+                            continue
+                        frames_bytes.append(jpg.tobytes())
+                        # Save the frame as a JPEG file
+                        save_dir = Path(CONFIG['save_directory'])
+                        save_dir.mkdir(exist_ok=True)
+                        frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
+                        cv2.imwrite(str(frame_filename), frame)
+                        # Save the frame as a JPEG file
+                        save_dir = Path(CONFIG['save_directory'])
+                        save_dir.mkdir(exist_ok=True)
+                        frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
+                        cv2.imwrite(str(frame_filename), frame)
+                    if frames_bytes:
+                        try:
+                            # Prepare video prompt
+                            video_prompt = (
+                                """
+                                The frame(s) provided is/are part of a video showing filled bottles moving on a conveyer belt in a production line.
+                                Bottles being produced are passed from the left to the right of the image. In the middle of the image there is a metallic arm separator, where according to the flow are bottles are expected to be located on its left side, which is the upper part of the image. 
+                                In some cases, one or few bottles could be pushed to the right of the separator which will be in the bottom of the image. You will need to report if you see any bottle in the right of the separator.
+                                If no bottles are spotted right of the separator (bottom of the image) then state that all bottles are normally located left of the separator (top of the image).
+                                You should report in JSON format with keys being the frame number and values being "bottle or more are pushed to the wrong position, which is an issue" or "the bottles are in the normal position.".
+                                Keep the answer strictly in JSON format and nothing else.
+                                """
+                            )
+                            description = describe_frames(frames_bytes, video_prompt)
+                            print(f"\nSegment {segment+1} (from {start_time:.2f}s to {min(start_time+interval_sec, duration):.2f}s):")
+                            print(description)
+                            # Call QA agent for each segment
+                            run_qa_agent(description, frames_bytes, video_path, f"segment_{segment+1}")
+                        except Exception as e:
+                            print(f"Failed to describe frames for segment {segment+1}: {e}")
+                    else:
+                        print(f"No frames extracted for segment {segment+1}.")
+                    segment += 1
+                    start_time += interval_sec
+                cap.release()
+
+            extract_and_describe_video_segments(args.video, args.n_frames, args.interval)
