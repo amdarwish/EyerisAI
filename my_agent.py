@@ -1,3 +1,205 @@
+
+# --- QA PROMPT for quality assurance use case ---
+QA_PROMPT = (
+    """
+    You are a quality assurance expert in an industrial plant.
+    You will receive a summary for one or few frames from monitoring a production line.
+    The summary is in JSON format, where for each frame you will short description whether a bottle is detected in a wrong position or not.
+    If any bottle is detected in a wrong position in any frame, it indicates a potential quality issue.
+    If an issue is found, set \"alert\": true and include a \"tool_call\" object with \"name\": \"send_email_alert_tool\".
+    Always include a brief \"reason\" explaining the decision.
+    """
+)
+
+# --- Add this new QA node ---
+def qa_model_node(state):
+    try:
+        messages = state["messages"]
+        latest_human_message = next((msg for msg in reversed(messages) if isinstance(msg, HumanMessage) or (isinstance(msg, dict) and msg.get('role') == 'user')), None)
+        if latest_human_message is None:
+            raise RuntimeError('No human message provided to agent')
+        human_content = latest_human_message.get('content') if isinstance(latest_human_message, dict) else latest_human_message.content
+
+        api_conf = CONFIG['ai']
+        model = api_conf.get('agent_model') or api_conf.get('model')
+        headers = {'Content-Type': 'application/json'}
+        if api_conf.get('api_key'):
+            headers['Authorization'] = f"Bearer {api_conf.get('api_key')}"
+
+        prompt = QA_PROMPT + "\nInput description:\n" + human_content
+        payload = {
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': 'You are a strict format-enforcing assistant. Output exactly one JSON object and nothing else.'},
+                {'role': 'user', 'content': prompt}
+            ],
+            'max_tokens': 1000,
+            'temperature': 0
+        }
+        base_url = api_conf.get('base_url')
+        resp = requests.post(f"{base_url}/v1/chat/completions", headers=headers, json=payload, timeout=360)
+        if resp.status_code == 200:
+            out = resp.json()['choices'][0]['message']['content']
+            return {"messages": [{"role": "user", "content": out}]}
+        else:
+            raise RuntimeError(f'LLM request failed: {resp.status_code} {resp.text}')
+    except Exception as e:
+        return {"messages": [{"role": "assistant", "content": f"Error: {e}"}]}
+
+# --- QA tool dispatch node (reuses send_email_alert_tool) ---
+def qa_tool_dispatch_node(state):
+    try:
+        messages = state["messages"]
+        last_message = messages[-1]
+        tool_calls = []
+        content = last_message.get('content') if isinstance(last_message, dict) else getattr(last_message, 'content', None)
+        if not isinstance(content, str):
+            content = ''
+        import re
+        try:
+            m = re.search(r"\{[\s\S]*\}", content)
+            if m:
+                data = json.loads(m.group(0))
+                if isinstance(data, dict) and data.get('tool_call') and isinstance(data['tool_call'], dict):
+                    tc = data['tool_call']
+                    args_obj = tc.get('args', {})
+                    tool_calls.append({
+                        'name': tc.get('name'),
+                        'args': json.dumps(args_obj),
+                        'id': 'tool_call_json_qa_0'
+                    })
+                elif isinstance(data, dict) and data.get('alert'):
+                    if data.get('tool_call') and isinstance(data['tool_call'], dict):
+                        tc = data['tool_call']
+                        args_obj = tc.get('args', {})
+                        tool_calls.append({
+                            'name': tc.get('name'),
+                            'args': json.dumps(args_obj),
+                            'id': 'tool_call_json_qa_1'
+                        })
+                    else:
+                        args_obj = {}
+                        for k in ('image_path', 'description', 'timestamp', 'frames_b64'):
+                            if k in data:
+                                args_obj[k] = data[k]
+                        if args_obj:
+                            tool_calls.append({
+                                'name': 'send_email_alert_tool',
+                                'args': json.dumps(args_obj),
+                                'id': 'tool_call_json_qa_2'
+                            })
+        except Exception as e:
+            print(f"qa_tool_dispatch_node: JSON parse attempt failed: {e}")
+        matches = re.findall(r'<tool_call name="([^"]+)" args="([\s\S]*?)"\s*/>', content)
+        for idx, (tool_name, args) in enumerate(matches):
+            tool_calls.append({
+                'name': tool_name,
+                'args': args,
+                'id': f'tool_call_xml_qa_{idx}'
+            })
+        new_messages = []
+        for call in tool_calls:
+            tool_name = call["name"]
+            args = call["args"]
+            print(f"[QA] Registering tool call: {tool_name} with args (raw): {args[:200] if args else args}")
+            if tool_name == 'send_email_alert_tool':
+                new_messages.append(
+                    ToolMessage(content=str(args), name=tool_name, tool_call_id=call.get('id'))
+                )
+                print(f"[QA] Tool {tool_name} registered (execution deferred to caller).")
+                continue
+        print(f"[QA] Tool dispatch node returning {len(new_messages)} messages.")
+        return {"messages": new_messages}
+    except Exception as e:
+        print(f"Error in qa_tool_dispatch_node: {e}")
+        error_msg = ToolMessage(
+            content="An error occurred while dispatching QA tools.",
+            name="qa_tool_dispatch_node",
+            tool_call_id=None
+        )
+        return {"messages": [error_msg]}
+
+
+# For QA, you can use a separate entry or conditional path. Here, we provide a public helper:
+
+def run_qa_agent(description: str, frames_bytes: list, image_path: str, timestamp: str):
+    try:
+        frames_trimmed = frames_bytes[:6]
+        frames_b64 = [base64.b64encode(b).decode('utf-8') for b in frames_trimmed]
+        global LAST_EVENT_CONTEXT
+        LAST_EVENT_CONTEXT = {
+            'description': description,
+            'frames_bytes': frames_trimmed,
+            'frames_b64': frames_b64,
+            'image_path': image_path,
+            'timestamp': timestamp
+        }
+        payload = {
+            'description': description
+        }
+        print('[qa_agent] Invoking QA graph with payload')
+        # Run only the QA nodes
+        qa_graph = StateGraph(MessagesState)
+        qa_graph.add_node("qa_model_node", qa_model_node)
+        qa_graph.add_node("qa_tools", qa_tool_dispatch_node)
+        qa_graph.add_edge(START, "qa_model_node")
+        qa_graph.add_conditional_edges("qa_model_node", should_continue, ["qa_tools", END])
+        qa_graph.add_edge("qa_tools", "qa_model_node")
+        qa_graph_compiled = qa_graph.compile()
+        result = qa_graph_compiled.invoke({
+            'messages': [
+                {'role': 'user', 'content': json.dumps(payload)}
+            ]
+        })
+        print(f"[qa_agent] QA graph invoke returned: {str(result)[:1000]}")
+        text = ''
+        if isinstance(result, dict) and 'messages' in result and result['messages']:
+            m = result['messages'][-1]
+            text = m.get('content') if isinstance(m, dict) else getattr(m, 'content', str(m))
+        else:
+            text = str(result)
+        import re
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            print('[qa_agent] No JSON found in model output; not sending QA email.')
+            return False
+        try:
+            data = json.loads(m.group(0))
+        except Exception as e:
+            print(f"Failed to parse JSON from QA model output: {e}")
+            return False
+        reason = data.get('reason')
+        tool_call = data.get('tool_call')
+        if tool_call and isinstance(tool_call, dict) and tool_call.get('name') == 'send_email_alert_tool':
+            if data.get('alert'):
+                print('[qa_agent] QA agent requested send_email_alert_tool and alert:true; sending QA email with full context')
+                send_email_alert_tool(
+                    image_path=LAST_EVENT_CONTEXT.get('image_path'),
+                    description=LAST_EVENT_CONTEXT.get('description'),
+                    timestamp=LAST_EVENT_CONTEXT.get('timestamp'),
+                    frames_bytes=LAST_EVENT_CONTEXT.get('frames_bytes'),
+                    reason=reason
+                )
+                return True
+            else:
+                print('[qa_agent] QA agent included tool_call for send_email_alert_tool but alert:false -> not sending QA email. Reason: ' + (reason or 'no reason provided'))
+                return False
+        if data.get('alert'):
+            print('[qa_agent] QA agent returned alert:true without explicit tool_call; sending QA email')
+            send_email_alert_tool(
+                image_path=LAST_EVENT_CONTEXT.get('image_path'),
+                description=LAST_EVENT_CONTEXT.get('description'),
+                timestamp=LAST_EVENT_CONTEXT.get('timestamp'),
+                frames_bytes=LAST_EVENT_CONTEXT.get('frames_bytes'),
+                reason=reason
+            )
+            return True
+        print('[qa_agent] QA agent decided NOT to send QA email: ' + (reason or 'no reason provided'))
+        return False
+    except Exception as e:
+        print(f"run_qa_agent error: {e}")
+        print('[qa_agent] QA agent error fallback: not sending QA email')
+        return False
 from langgraph.graph import END
 from datetime import datetime
 import pytz
@@ -263,20 +465,18 @@ def tool_dispatch_node(state):
         )
         return {"messages": [error_msg]}
 
-builder = StateGraph(MessagesState)
-builder.add_node("call_model", call_model)
-builder.add_node("tools", tool_dispatch_node)
-builder.add_edge(START, "call_model")
-builder.add_conditional_edges("call_model", should_continue, ["tools", END])
-builder.add_edge("tools", "call_model")
-graph = builder.compile()
+
 
 # Public helper to run the agent for a motion event. This will invoke the graph and
 # prefer the agent's decision if available; otherwise fall back to a simple keyword check.
 # Module-level context for the last event so tools can access full data even when LLM only sees description
 LAST_EVENT_CONTEXT = {}
 
-def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: str):
+
+def run_motion_agent(description: str, frames_bytes: list, image_path: str, timestamp: str):
+    """
+    Run the motion/human detection agent. This builds and uses the motion_graph (call_model/tools).
+    """
     try:
         # Limit frames to at most 6 for sending
         frames_trimmed = frames_bytes[:6]
@@ -296,14 +496,23 @@ def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: 
             'description': description
         }
 
-        print('[agent] Invoking graph with payload')
-        result = graph.invoke({
+        # Build the motion graph (call_model/tools)
+        builder = StateGraph(MessagesState)
+        builder.add_node("call_model", call_model)
+        builder.add_node("tools", tool_dispatch_node)
+        builder.add_edge(START, "call_model")
+        builder.add_conditional_edges("call_model", should_continue, ["tools", END])
+        builder.add_edge("tools", "call_model")
+        motion_graph = builder.compile()
+
+        print('[motion_agent] Invoking motion_graph with payload')
+        result = motion_graph.invoke({
             'messages': [
                 {'role': 'user', 'content': json.dumps(payload)}
             ]
         })
 
-        print(f"[agent] Graph invoke returned: {str(result)[:1000]}")
+        print(f"[motion_agent] Graph invoke returned: {str(result)[:1000]}")
 
         # Extract model output (final JSON) from result
         text = ''
@@ -317,14 +526,14 @@ def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: 
         import re
         m = re.search(r"\{[\s\S]*\}", text)
         if not m:
-            print('[agent] No JSON found in model output; falling back to heuristic')
+            print('[motion_agent] No JSON found in model output; falling back to heuristic')
             # Fallback heuristic
             if 'person' in description.lower() or 'human' in description.lower():
                 reason = 'heuristic: description contains person/human'
                 send_email_alert_tool(image_path=image_path, description=description, timestamp=timestamp, frames_bytes=frames_trimmed, reason=reason)
                 return True
             else:
-                print('[agent] Fallback heuristic: no person detected -> not sending email')
+                print('[motion_agent] Fallback heuristic: no person detected -> not sending email')
                 return False
 
         try:
@@ -340,7 +549,7 @@ def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: 
         # If model provided a tool_call, only honor it when alert is explicitly true.
         if tool_call and isinstance(tool_call, dict) and tool_call.get('name') == 'send_email_alert_tool':
             if data.get('alert'):
-                print('[agent] Agent requested send_email_alert_tool and alert:true; sending email with full context')
+                print('[motion_agent] Agent requested send_email_alert_tool and alert:true; sending email with full context')
                 send_email_alert_tool(
                     image_path=LAST_EVENT_CONTEXT.get('image_path'),
                     description=LAST_EVENT_CONTEXT.get('description'),
@@ -350,13 +559,12 @@ def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: 
                 )
                 return True
             else:
-                # Model included a tool_call but explicitly indicated no alert; respect that.
-                print('[agent] Agent included tool_call for send_email_alert_tool but alert:false -> not sending email. Reason: ' + (reason or 'no reason provided'))
+                print('[motion_agent] Agent included tool_call for send_email_alert_tool but alert:false -> not sending email. Reason: ' + (reason or 'no reason provided'))
                 return False
 
         # If explicit alert true without tool_call, honor it
         if data.get('alert'):
-            print('[agent] Agent returned alert:true without explicit tool_call; sending email')
+            print('[motion_agent] Agent returned alert:true without explicit tool_call; sending email')
             send_email_alert_tool(
                 image_path=LAST_EVENT_CONTEXT.get('image_path'),
                 description=LAST_EVENT_CONTEXT.get('description'),
@@ -366,19 +574,18 @@ def run_agent(description: str, frames_bytes: list, image_path: str, timestamp: 
             )
             return True
 
-        # Otherwise, agent decided not to send email
-        print('[agent] Agent decided NOT to send email: ' + (reason or 'no reason provided'))
+        print('[motion_agent] Agent decided NOT to send email: ' + (reason or 'no reason provided'))
         return False
 
     except Exception as e:
-        print(f"run_agent error: {e}")
+        print(f"run_motion_agent error: {e}")
         # On error, fallback heuristic
         if 'person' in description.lower() or 'human' in description.lower():
             reason = 'heuristic (error fallback): description contains person/human'
             send_email_alert_tool(image_path=image_path, description=description, timestamp=timestamp, frames_bytes=frames_bytes[:6], reason=reason)
             return True
         else:
-            print('[agent] Agent error fallback: not sending email')
+            print('[motion_agent] Agent error fallback: not sending email')
             return False
 
 
@@ -423,7 +630,7 @@ def send_email_alert_tool(image_path=None, description=None, timestamp=None, fra
     # Create the email message
     msg = MIMEMultipart()
     subject_reason = (reason[:80] + '...') if reason and len(reason) > 80 else (reason or '')
-    msg['Subject'] = f"{CONFIG['instance_name']} - Motion Detected at {timestamp}" + (f" - {subject_reason}" if subject_reason else "")
+    msg['Subject'] = f"{CONFIG['instance_name']} - Event Detected at {timestamp}" + (f" - {subject_reason}" if subject_reason else "")
     msg['From'] = email_config['from_address']
     msg['To'] = email_config['to_address']
 

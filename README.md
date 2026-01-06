@@ -54,7 +54,7 @@ The resulting email alert that was sent in response to the AI determining that a
 
 ![fall-detection-email-alert](images/fall-dectection-alert.png)
 
-### Home Security Monitoring
+### CCTV Monitoring
 
 In this example, I captured myself entering my office (wearing a headlamp to obscure my face). I provided a prompt to the AI telling it that it was a security camera and it was to watch for and alert when it detected any activity while I was out of town: 
 
@@ -143,7 +143,7 @@ base_url = http://localhost:11434
 #model = gpt4o
 #base_url = https://api.openai.com/v1
 api_key = sk-12345
-prompt = You are a home security camera that has detected motion. The areas where motion was detected are indicated with magenta contours. Examine the image and report what activity you see, especially any humans visible.
+prompt = You are a CCTV camera that has detected motion. The areas where motion was detected are indicated with magenta contours. Examine the image and report what activity you see, especially any humans visible.
 ```
 
 There are other things that can be configured or adjusted, such as sending emails, that aren't covered here but should be self explanatory.
