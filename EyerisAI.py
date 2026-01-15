@@ -284,7 +284,7 @@ def describe_frames(images: list, prompt_text: str) -> str:
         f"{api_config['base_url']}/v1/chat/completions",
         headers=headers,
         json=payload,
-        timeout=240
+        timeout=360
     )
 
     if response.status_code == 200:
@@ -472,7 +472,7 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
         except Exception as e2:
             print(f"Fallback also failed: {e2}")
 
-def run_motion_detection():
+def run_motion_detection(prompt=''):
     """
     Main function to run motion detection
     """
@@ -660,13 +660,13 @@ def run_motion_detection():
                         try:
                             # Prepare motion prompt
                             api_config = CONFIG['ai']
-                            motion_prompt = api_config.get('motion_prompt') or api_config.get('prompt')
-                            motion_prompt = (
-                                "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
-                                "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
-                                "Keep the answer as a single clear paragraph in English.\n\n"
-                                + motion_prompt
-                            )
+                            motion_prompt = prompt
+                            # motion_prompt = (
+                            #     "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
+                            #     "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
+                            #     "Keep the answer as a single clear paragraph in English.\n\n"
+                            #     + motion_prompt
+                            # )
                             description = describe_frames(frames_bytes, motion_prompt)
                         except Exception as e:
                             print(f"AI description failed: {e}")
@@ -725,12 +725,13 @@ if __name__ == "__main__":
     parser.add_argument('--image', type=str, help='Path to image file (required for count)')
     parser.add_argument('--item', type=str, help='Name of the item to count (required for count)')
     parser.add_argument('--video', type=str, help='Path to local video file (required for video mode)')
-    parser.add_argument('--n-frames', type=int, default=3, help='Number of frames to extract (video mode, default: 3)')
-    parser.add_argument('--interval', type=float, default=4.0, help='Interval in seconds to sample frames over (video mode, default: 10.0)')
+    parser.add_argument('--n-frames', type=int, default=4, help='Number of frames to extract (video mode, default: 3)')
+    parser.add_argument('--interval', type=float, default=0.0, help='Interval in seconds to sample frames over (video mode, default: 10.0)')
+    parser.add_argument('--prompt', type=str, default='', help='Custom prompt for the use case')
     args = parser.parse_args()
 
     if args.use_case == 'motion':
-        run_motion_detection()
+        run_motion_detection(prompt=args.prompt)
     elif args.use_case == 'count':
         if not args.image or not args.item:
             print("For counting, you must provide --image and --item arguments.")
@@ -741,7 +742,7 @@ if __name__ == "__main__":
             print("For video mode, you must provide --video argument with the path to the video file.")
         else:
             from my_agent import run_qa_agent
-            def extract_and_describe_video_segments(video_path, n_frames, interval_sec):
+            def extract_and_describe_video_segments(video_path, n_frames, interval_sec, prompt=''):
                 cap = cv2.VideoCapture(video_path)
                 if not cap.isOpened():
                     print(f"Failed to open video file: {video_path}")
@@ -753,10 +754,19 @@ if __name__ == "__main__":
                     print("Invalid video file or unable to read FPS/frames.")
                     cap.release()
                     return
+                # If interval is 0.0 (default), use the entire video duration
+                if interval_sec == 0.0:
+                    interval_sec = duration
+                    print(f"Using entire video duration as interval: {duration:.2f} seconds")
                 segment = 0
                 start_time = 0.0
                 while start_time < duration:
-                    frame_indices = [int((start_time + i * interval_sec / (n_frames - 1)) * fps) for i in range(n_frames)] if n_frames > 1 else [int(start_time * fps)]
+                    if n_frames > 1:
+                        frame_indices = [int((start_time + i * interval_sec / (n_frames - 1)) * fps) for i in range(n_frames)]
+                        # Ensure the last frame index doesn't exceed total_frames - 1
+                        frame_indices = [min(idx, total_frames - 1) for idx in frame_indices]
+                    else:
+                        frame_indices = [int(start_time * fps)]
                     frames_bytes = []
                     for frame_num, idx in enumerate(frame_indices):
                         if idx >= total_frames:
@@ -784,17 +794,24 @@ if __name__ == "__main__":
                     if frames_bytes:
                         try:
                             # Prepare video prompt
-                            video_prompt = (
-                                """
-                                The frame(s) provided is/are part of a video showing filled bottles moving on a conveyer belt in a production line.
-                                Bottles being produced are passed from the left to the right of the image. In the middle of the image there is a metallic arm separator, where according to the flow are bottles are expected to be located on its left side, which is the upper part of the image. 
-                                In some cases, one or few bottles could be pushed to the right of the separator which will be in the bottom of the image. You will need to report if you see any bottle in the right of the separator.
-                                If no bottles are spotted right of the separator (bottom of the image) then state that all bottles are normally located left of the separator (top of the image).
-                                You should report in JSON format with keys being the frame number and values being "bottle or more are pushed to the wrong position, which is an issue" or "the bottles are in the normal position.".
-                                Keep the answer strictly in JSON format and nothing else.
-                                """
-                            )
-                            description = describe_frames(frames_bytes, video_prompt)
+                            # video_prompt = (
+                            #     """
+                                # The frame(s) provided is/are part of a video showing filled bottles moving on a conveyer belt in a production line.
+                                # Bottles being produced are passed from the left to the right of the image. In the middle of the image there is a metallic arm separator, where according to the flow are bottles are expected to be located on its left side, which is the upper part of the image. 
+                                # In some cases, one or few bottles could be pushed to the right of the separator which will be in the bottom of the image. You will need to report if you see any bottle in the right of the separator.
+                                # If no bottles are spotted right of the separator (bottom of the image) then state that all bottles are normally located left of the separator (top of the image).
+                                # You should report in JSON format with keys being the frame number and values being "bottle or more are pushed to the wrong position, which is an issue" or "the bottles are in the normal position.".
+                                # Keep the answer strictly in JSON format and nothing else.
+                            #     """
+                            # )
+                            # lab_prompt = (
+                            #     """
+                            #     The frames provided are part of a video showing a machine in a lab that uses solid thin pins then dispenses them in the trash bin located in the bottom of the images.
+                            #     The trash bin is covered with a plastic shield. Your role is to detect for each frame if the pins are piling up to an extent that can cause an issue or not.
+                            #     You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are still at normal level'
+                            #     """
+                            # )
+                            description = describe_frames(frames_bytes, prompt)
                             print(f"\nSegment {segment+1} (from {start_time:.2f}s to {min(start_time+interval_sec, duration):.2f}s):")
                             print(description)
                             # Call QA agent for each segment
@@ -806,5 +823,6 @@ if __name__ == "__main__":
                     segment += 1
                     start_time += interval_sec
                 cap.release()
-
-            extract_and_describe_video_segments(args.video, args.n_frames, args.interval)
+            print("Current time:", datetime.now().isoformat())
+            extract_and_describe_video_segments(args.video, args.n_frames, args.interval, prompt=args.prompt)
+            print("Current time:", datetime.now().isoformat())
