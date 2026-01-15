@@ -2,12 +2,15 @@
 # --- QA PROMPT for quality assurance use case ---
 QA_PROMPT = (
     """
-    You are a quality assurance expert in an industrial plant.
-    You will receive a summary for one or few frames from monitoring a production line.
-    The summary is in JSON format, where for each frame you will short description whether a bottle is detected in a wrong position or not.
-    If any bottle is detected in a wrong position in any frame, it indicates a potential quality issue.
-    If an issue is found, set \"alert\": true and include a \"tool_call\" object with \"name\": \"send_email_alert_tool\".
-    Always include a brief \"reason\" explaining the decision.
+    You will receive input containing a 'description' field with frame analysis data in JSON format. Each key represents a frame index and the value describes that frame.
+    
+    Analyze the frame descriptions and determine if there are any issues mentioned.
+    
+    Return EXACTLY ONE JSON object with this format:
+    - If ANY frame indicates an issue: {"alert": true, "tool_call": {"name": "send_email_alert_tool"}, "reason": "brief explanation of what issues were found"}
+    - If NO issues are found: {"alert": false, "reason": "brief explanation why no alert is needed"}
+    
+    Look for keywords indicating problems like "issue", "problem", "piling up high", "can fall", etc.
     """
 )
 
@@ -154,8 +157,12 @@ def run_qa_agent(description: str, frames_bytes: list, image_path: str, timestam
         print(f"[qa_agent] QA graph invoke returned: {str(result)[:1000]}")
         text = ''
         if isinstance(result, dict) and 'messages' in result and result['messages']:
-            m = result['messages'][-1]
-            text = m.get('content') if isinstance(m, dict) else getattr(m, 'content', str(m))
+            # Find the last non-empty message content
+            for msg in reversed(result['messages']):
+                content = msg.get('content') if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if content and content.strip():
+                    text = content
+                    break
         else:
             text = str(result)
         import re
