@@ -61,7 +61,10 @@ def count_items(image_path: str, item_name: str):
                 ]
             }
         ],
-        'max_tokens': 100
+        'max_tokens': 100,
+        # 'temperature': 0.0,
+        # 'top_p': 1.0,
+        'seed': 42
     }
     try:
         response = requests.post(f"{api_config['base_url']}/v1/chat/completions", headers=headers, json=payload, timeout=60)
@@ -232,7 +235,10 @@ def describe_image(image) -> str:
                 ]
             }
         ],
-        'max_tokens': api_config.get('max_tokens', 300)
+        'max_tokens': api_config.get('max_tokens', 300),
+        # 'temperature': 0.0,
+        # 'top_p': 1.0,
+        'seed': 42
     }
     
     response = requests.post(
@@ -277,7 +283,10 @@ def describe_frames(images: list, prompt_text: str) -> str:
                 'content': content_items
             }
         ],
-        'max_tokens': api_config.get('max_tokens', 10000)
+        'max_tokens': api_config.get('max_tokens', 10000),
+        # 'temperature': 0.0,
+        # 'top_p': 3.0,
+        'seed': 42,
     }
 
     response = requests.post(
@@ -411,7 +420,10 @@ def ask_agent_should_alert(description: str) -> bool:
         'messages': [
             {'role': 'user', 'content': prompt}
         ],
-        'max_tokens': 200
+        'max_tokens': 200,
+        # 'temperature': 0.0,
+        # 'top_p': 1.0,
+        'seed': 42
     }
 
     try:
@@ -725,7 +737,8 @@ if __name__ == "__main__":
     parser.add_argument('--image', type=str, help='Path to image file (required for count)')
     parser.add_argument('--item', type=str, help='Name of the item to count (required for count)')
     parser.add_argument('--video', type=str, help='Path to local video file (required for video mode)')
-    parser.add_argument('--n-frames', type=int, default=4, help='Number of frames to extract (video mode, default: 3)')
+    parser.add_argument('--video-use-case', type=str, default=None, choices=['trash', 'bottles'], help='Predefined video use case: trash or bottles (optional for video mode)')
+    parser.add_argument('--n-frames', type=int, default=3, help='Number of frames to extract (video mode, default: 3)')
     parser.add_argument('--interval', type=float, default=0.0, help='Interval in seconds to sample frames over (video mode, default: 10.0)')
     parser.add_argument('--prompt', type=str, default='', help='Custom prompt for the use case')
     args = parser.parse_args()
@@ -742,6 +755,39 @@ if __name__ == "__main__":
             print("For video mode, you must provide --video argument with the path to the video file.")
         else:
             from my_agent import run_qa_agent
+            
+            # Define predefined prompts for video use cases
+            def get_video_prompt(video_use_case, custom_prompt):
+                if video_use_case == 'trash':
+                    # return ("The frames provided are part of a video showing a machine in a lab that uses solid thin pins then dispenses them in the trash bin located in the bottom of the images."
+                    #        "The trash bin is covered with a plastic shield. Your role is to detect for each frame if the pins are piling up to an extent that can cause an issue or not. "
+                    #        "You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are at normal level, not piling up high'")
+                    return ("""
+                            Analyze the provided video frames to determine if the black pins in the clear plastic trash bin (positioned at the bottom center of the image) are piling up high (causing risk of mechanical issues). Use the following criteria:
+                            The pins are piling up high if they exceeds 70 percent of the bin’s vertical height.
+                            Key visual cue: The pile forms a tall, consolidated mass (not scattered) that visually threatens to overflow or obstruct the machine’s operation.
+                            The other case: The pins aren't piling up high if they are below 50 percent of the bin’s height.
+                            Key visual cue: Pins are scattered or form a shallow layer with significant empty space above them.
+                            You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are at normal level, not piling up high'
+                            """)
+                elif video_use_case == 'bottles':
+                    # return ("The frames provided are part of a video showing filled bottles moving on a conveyer belt in a production line. "
+                    #        "Bottles being produced are passed from the left to the right of the image. In the middle of the image there is a metallic vertical tube with horizontal separator, where according to the flow, bottles are expected to be on the left side of the horizontal separator. "
+                    #        "From the angle where the camera is placed, bottles shouldn't be infront of the horizontal separator. In some cases, one or few bottles could be pushed to the right of the horizontal separator in their flow, which according to the camera angle is infront of the horizontal separator. "
+                    #        "You will need to report if you see any bottle seen to the right of the horizontal separator in the flow, which according to the camera angle will be seen is infront of the horizontal separator. "
+                    #        "If no bottles are spotted right of the horizontal separator then state that all bottles are normally located left of the horizontal separator. "
+                    #        "You should report in JSON format with keys being the frame number and values being 'bottle or more are pushed to the wrong position, which is an issue' or 'the bottles are in the normal position.'. "
+                    #        "Keep the answer strictly in JSON format and nothing else.")
+                    return ("""
+                            Analyze this frame from a bottle production line. The critical reference is the fixed metallic arm with horizontal separator (the metal bar) in the center.
+                            Normal case: All bottles are positioned behind the horizontal separator arm (i.e., moving away from the arm toward the right of the frame).
+                            Anomaly case: Any bottle is positioned in front of the horizontal separator arm (i.e., to the left of the arm's metal bar in the frame).
+                            You should report in JSON format with keys being the frame number and values being 'bottle or more are pushed to the wrong position, which is an issue (anomaly case)' or 'the bottles are in the normal position (normal case).'
+                            Keep the answer strictly in JSON format and nothing else.
+                            """)
+                else:
+                    return custom_prompt
+            
             def extract_and_describe_video_segments(video_path, n_frames, interval_sec, prompt=''):
                 cap = cv2.VideoCapture(video_path)
                 if not cap.isOpened():
@@ -824,5 +870,6 @@ if __name__ == "__main__":
                     start_time += interval_sec
                 cap.release()
             print("Current time:", datetime.now().isoformat())
-            extract_and_describe_video_segments(args.video, args.n_frames, args.interval, prompt=args.prompt)
+            final_prompt = get_video_prompt(args.video_use_case, args.prompt)
+            extract_and_describe_video_segments(args.video, args.n_frames, args.interval, prompt=final_prompt)
             print("Current time:", datetime.now().isoformat())
