@@ -37,7 +37,9 @@ def qa_model_node(state):
                 {'role': 'user', 'content': prompt}
             ],
             'max_tokens': 1000,
-            'temperature': 0
+            # 'temperature': 0.0,
+            # 'top_p': 1.0,
+            'seed': 42
         }
         base_url = api_conf.get('base_url')
         resp = requests.post(f"{base_url}/v1/chat/completions", headers=headers, json=payload, timeout=360)
@@ -309,7 +311,9 @@ def call_model(state):
                 {'role': 'user', 'content': prompt}
             ],
             'max_tokens': 1000,
-            'temperature': 0
+            # 'temperature': 0.0,
+            # 'top_p': 1.0,
+            'seed': 42
         }
 
         base_url = api_conf.get('base_url')
