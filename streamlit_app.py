@@ -1,71 +1,67 @@
 import streamlit as st
-import cv2
-import numpy as np
-import pandas as pd
+import os
 import json
-import time
-import threading
-from datetime import datetime
-from pathlib import Path
 import base64
+from datetime import datetime
+import pytz
 from PIL import Image
 import io
 import configparser
-import plotly.express as px
-import plotly.graph_objects as go
-import os
-import requests
+from pathlib import Path
+import tempfile
+from typing import List, Optional
+import cv2
+import numpy as np
 
-# Import utility modules first
+# Import your agent functions
 try:
-    from streamlit_utils import (
-        CameraManager, MotionDetector, EventLogger,
-        frame_to_base64, save_frame, create_status_indicator, format_timestamp
-    )
-except ImportError:
-    st.error("streamlit_utils.py not found. Please ensure all files are in the same directory.")
+    from my_agent import run_motion_agent, run_qa_agent, CONFIG, load_config_local
+except ImportError as e:
+    st.error(f"Error importing agent functions: {e}")
     st.stop()
 
-# Safe import of EyerisAI core functions
-def safe_import_eyeris_functions():
-    try:
-        from EyerisAI import describe_image, describe_frames, count_items, detect_motion, load_config
-        return describe_image, describe_frames, count_items, detect_motion, load_config
-    except Exception as e:
-        st.error(f"Error importing EyerisAI functions: {str(e)}")
-        return None, None, None, None, None
+def update_config_with_overrides(override_config):
+    """Update the global CONFIG with provided overrides"""
+    global CONFIG
+    if override_config:
+        # Create a new config with overrides applied
+        new_config = CONFIG.copy()
+        
+        # Apply AI configuration overrides
+        if 'ai' in override_config:
+            new_config['ai'].update(override_config['ai'])
+        
+        # Apply other section overrides as needed
+        for section, values in override_config.items():
+            if section != 'ai' and isinstance(values, dict):
+                new_config.setdefault(section, {}).update(values)
+        
+        CONFIG = new_config
+        print(f"[CONFIG] Updated with overrides: {override_config}")
 
-# Try to import agent functions
-def safe_import_agents():
-    try:
-        from my_agent import run_motion_agent, run_qa_agent, send_email_alert_tool
-        return run_motion_agent, run_qa_agent, send_email_alert_tool
-    except Exception as e:
-        st.error(f"Error importing agent functions: {str(e)}")
-        # Return dummy functions
-        def dummy_agent(*args, **kwargs):
-            return False
-        return dummy_agent, dummy_agent, dummy_agent
 
-# Initialize with safe imports
-describe_image, describe_frames, count_items, detect_motion, load_config = safe_import_eyeris_functions()
-run_motion_agent, run_qa_agent, send_email_alert_tool = safe_import_agents()
 
-# Load config using EyerisAI's load_config function
-try:
-    CONFIG = load_config() if load_config else None
-except Exception as e:
-    st.error(f"Failed to load EyerisAI config: {str(e)}")
-    CONFIG = None
+def apply_config_to_agents(effective_config, base_config):
+    """Apply effective config to agents if there are any differences"""
+    if effective_config != base_config:
+        # Extract only the differences for the override
+        override_data = {}
+        
+        # Check AI section differences
+        if effective_config.get('ai') != base_config.get('ai'):
+            ai_overrides = {}
+            for key in ['model', 'base_url', 'api_key']:
+                if effective_config.get('ai', {}).get(key) != base_config.get('ai', {}).get(key):
+                    ai_overrides[key] = effective_config.get('ai', {}).get(key)
+            if ai_overrides:
+                override_data['ai'] = ai_overrides
+        
+        if override_data:
+            update_config_with_overrides(override_data)
 
-# Helper functions for the UI
-# describe_image_ui removed - using EyerisAI.describe_image instead
-
-# detect_motion_ui removed - using EyerisAI.detect_motion instead
-
-# All backend functions removed - using EyerisAI.py and my_agent.py directly
+# Set page configuration
 st.set_page_config(
-    page_title="EyerisAI - Intelligent Surveillance System",
+    page_title="EyerisAI Workflow Agent",
     page_icon="👁️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -75,1066 +71,626 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
-        font-weight: bold;
         text-align: center;
-        color: #1f77b4;
+        color: #2E86AB;
+        font-size: 2.5rem;
         margin-bottom: 2rem;
+        font-weight: bold;
     }
-    .feature-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
+    .section-header {
+        color: #F24236;
+        font-size: 1.5rem;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+        border-bottom: 2px solid #F24236;
+        padding-bottom: 0.5rem;
     }
     .status-success {
-        color: #28a745;
-        font-weight: bold;
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        color: #155724;
+        padding: 0.75rem;
+        margin-bottom: 1rem;
+        border-radius: 0.375rem;
     }
     .status-warning {
-        color: #ffc107;
-        font-weight: bold;
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        color: #856404;
+        padding: 0.75rem;
+        margin-bottom: 1rem;
+        border-radius: 0.375rem;
     }
     .status-error {
-        color: #dc3545;
-        font-weight: bold;
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        color: #721c24;
+        padding: 0.75rem;
+        margin-bottom: 1rem;
+        border-radius: 0.375rem;
     }
     .metric-container {
-        background-color: #ffffff;
+        background-color: #f8f9fa;
         padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-radius: 0.5rem;
+        border-left: 4px solid #2E86AB;
     }
 </style>
 """, unsafe_allow_html=True)
 
-class StreamlitEyerisAI:
-    def __init__(self):
-        self.config = CONFIG
-        # Only initialize camera manager if streamlit_utils is available
-        try:
-            self.camera_manager = CameraManager()
-            self.motion_detector = MotionDetector(self.config)
-        except:
-            self.camera_manager = None
-            self.motion_detector = None
-        
-        # Initialize session state
-        if 'motion_running' not in st.session_state:
-            st.session_state.motion_running = False
-        if 'events_log' not in st.session_state:
-            st.session_state.events_log = []
-        if 'config_updated' not in st.session_state:
-            st.session_state.config_updated = False
-        if 'camera_source' not in st.session_state:
-            st.session_state.camera_source = None
+def load_config():
+    """Load and return configuration"""
+    try:
+        config = load_config_local()
+        # Validate required configuration sections
+        if not config.get('ai', {}).get('base_url'):
+            st.warning("AI base_url not configured in config.ini")
+        if not config.get('ai', {}).get('model'):
+            st.warning("AI model not configured in config.ini")
+        if config.get('email', {}).get('enabled') and not config.get('email', {}).get('smtp_server'):
+            st.warning("Email enabled but SMTP server not configured")
+        return config
+    except FileNotFoundError:
+        st.error("config.ini file not found. Please ensure it exists in the project directory.")
+        return None
+    except Exception as e:
+        st.error(f"Error loading configuration: {e}")
+        return None
 
-    def main(self):
-        """Main application interface"""
-        st.markdown('<h1 class="main-header">👁️ EyerisAI Control Center</h1>', unsafe_allow_html=True)
+def test_ai_connection(config):
+    """Test AI endpoint connectivity"""
+    import requests
+    try:
+        base_url = config.get('ai', {}).get('base_url')
+        if not base_url:
+            return False, "No base URL configured"
+            
+        # Simple health check to models endpoint
+        health_url = f"{base_url.rstrip('/')}/v1/models"
+        headers = {'Content-Type': 'application/json'}
+        api_key = config.get('ai', {}).get('api_key')
+        if api_key:
+            headers['Authorization'] = f"Bearer {api_key}"
+            
+        response = requests.get(health_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return True, "Connected successfully"
+        else:
+            return False, f"Error {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        return False, f"Connection failed: {str(e)}"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+def get_effective_config(base_config):
+    """Get configuration with session state overrides applied"""
+    if not base_config:
+        return base_config
+    
+    # Start with base config
+    effective_config = base_config.copy()
+    
+    # Apply any session state overrides
+    if hasattr(st, 'session_state') and 'config_override' in st.session_state:
+        overrides = st.session_state.config_override
+        if overrides.get('model'):
+            effective_config.setdefault('ai', {})['model'] = overrides['model']
+        if overrides.get('base_url'):
+            effective_config.setdefault('ai', {})['base_url'] = overrides['base_url']
+    
+    return effective_config
+
+def save_uploaded_file(uploaded_file) -> str:
+    """Save uploaded file to temporary directory and return path"""
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, uploaded_file.name)
+    
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    
+    return file_path
+
+def extract_video_frames(video_path: str, max_frames: int = 6, sample_rate: int = 30) -> List[bytes]:
+    """Extract frames from video file and convert to bytes list"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            st.error("Error opening video file")
+            return []
         
-        # Sidebar navigation
-        page = st.sidebar.selectbox(
-            "Navigate to:",
-            ["🏠 Dashboard", "🎥 Motion Detection", "🔍 Item Counter", "📹 Video Analysis", "⚙️ Configuration", "📊 Analytics", "📋 Event Logs"]
+        frames = []
+        frame_count = 0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        
+        # Calculate sampling interval to get desired number of frames
+        if total_frames <= max_frames:
+            sample_interval = 1
+        else:
+            sample_interval = total_frames // max_frames
+        
+        while len(frames) < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if frame_count % sample_interval == 0:
+                # Convert frame to bytes
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                frame_bytes = buffer.tobytes()
+                frames.append(frame_bytes)
+            
+            frame_count += 1
+        
+        cap.release()
+        st.success(f"Extracted {len(frames)} frames from video (Total frames: {total_frames}, FPS: {fps})")
+        return frames
+    
+    except Exception as e:
+        st.error(f"Error extracting video frames: {e}")
+        return []
+
+def convert_image_to_bytes(image_path: str) -> List[bytes]:
+    """Convert image to bytes list (fallback for single images)"""
+    try:
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+        return [image_bytes]
+    except Exception as e:
+        st.error(f"Error converting image: {e}")
+        return []
+
+def display_results(result: bool, agent_type: str, description: str):
+    """Display agent results in a formatted way"""
+    if result:
+        st.markdown(
+            f'<div class="status-success">✅ <strong>{agent_type} Agent Result:</strong> Alert triggered! Email would be sent.<br><strong>Description:</strong> {description}</div>',
+            unsafe_allow_html=True
         )
-        
-        # Route to appropriate page
-        if page == "🏠 Dashboard":
-            self.dashboard_page()
-        elif page == "🎥 Motion Detection":
-            self.motion_detection_page()
-        elif page == "🔍 Item Counter":
-            self.item_counter_page()
-        elif page == "📹 Video Analysis":
-            self.video_analysis_page()
-        elif page == "⚙️ Configuration":
-            self.configuration_page()
-        elif page == "📊 Analytics":
-            self.analytics_page()
-        elif page == "📋 Event Logs":
-            self.event_logs_page()
+    else:
+        st.markdown(
+            f'<div class="status-warning">⚠️ <strong>{agent_type} Agent Result:</strong> No alert triggered.<br><strong>Description:</strong> {description}</div>',
+            unsafe_allow_html=True
+        )
 
-    def dashboard_page(self):
-        """Main dashboard with system overview"""
-        st.header("System Overview")
+def main():
+    # Header
+    st.markdown('<h1 class="main-header">👁️ EyerisAI Workflow Agent</h1>', unsafe_allow_html=True)
+    
+    # Load configuration
+    base_config = load_config()
+    if not base_config:
+        st.error("Failed to load configuration. Please check your config.ini file.")
+        return
+    
+    # Get effective config (with any overrides)
+    config = get_effective_config(base_config)
+    
+    # Sidebar for configuration and settings
+    with st.sidebar:
+        st.markdown("## ⚙️ Configuration")
         
-        # System status metrics
-        col1, col2, col3, col4 = st.columns(4)
+        # Show if any overrides are active
+        if hasattr(st, 'session_state') and st.session_state.get('config_override'):
+            overrides = st.session_state.config_override
+            active_overrides = [k for k, v in overrides.items() if v]
+            if active_overrides:
+                st.info(f"🔧 Active overrides: {', '.join(active_overrides)}")
         
-        with col1:
-            st.metric(
-                "Motion Detection",
-                "Active" if st.session_state.motion_running else "Inactive",
-                delta="Running" if st.session_state.motion_running else "Stopped"
-            )
+        # Display current configuration
+        st.markdown("### Current Settings")
+        st.markdown(f"**Instance Name:** {config.get('instance_name', 'Not set')}")
+        st.markdown(f"**AI Model:** {config.get('ai', {}).get('model', 'Not set')}")
+        st.markdown(f"**Agent Model:** {config.get('ai', {}).get('agent_model', 'Same as AI Model')}")
+        st.markdown(f"**Base URL:** {config.get('ai', {}).get('base_url', 'Not set')}")
+        st.markdown(f"**Email Enabled:** {'✅' if config.get('email', {}).get('enabled') else '❌'}")
         
-        with col2:
-            model_display = f"{self.config['ai']['model']}"
-            if self.config['ai'].get('agent_model') != self.config['ai']['model']:
-                model_display += f" / {self.config['ai']['agent_model']}"
-            st.metric("AI Model", model_display)
+        # Show API key status (masked)
+        api_key = config.get('ai', {}).get('api_key')
+        if api_key:
+            masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "***"
+            st.markdown(f"**API Key:** {masked_key} ✅")
+        else:
+            st.markdown("**API Key:** Not set ❌")
         
-        with col3:
-            st.metric("Events Today", len(st.session_state.events_log))
+        # Email configuration section
+        st.markdown("### 📧 Email Settings")
+        if config.get('email', {}).get('enabled'):
+            st.success("Email alerts are enabled")
+            st.markdown(f"**SMTP Server:** {config.get('email', {}).get('smtp_server', 'Not set')}")
+            st.markdown(f"**Port:** {config.get('email', {}).get('smtp_port', 'Not set')}")
+            st.markdown(f"**From:** {config.get('email', {}).get('from_address', 'Not set')}")
+            st.markdown(f"**To:** {config.get('email', {}).get('to_address', 'Not set')}")
+            st.markdown(f"**TLS:** {'✅' if config.get('email', {}).get('use_tls') else '❌'}")
+        else:
+            st.warning("Email alerts are disabled")
         
-        with col4:
-            st.metric(
-                "Email Alerts", 
-                "Enabled" if self.config['email']['enabled'] else "Disabled"
-            )
+        # Configuration file info
+        st.markdown("### 📄 Configuration File")
+        st.markdown(f"**Location:** `config.ini`")
+        st.markdown(f"**Last loaded:** {datetime.now().strftime('%H:%M:%S')}")
         
         # Quick actions
-        st.subheader("Quick Actions")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            if st.button("🎥 Start Motion Detection", use_container_width=True):
-                st.switch_page("Motion Detection")
-        
-        with col2:
-            if st.button("🔍 Count Items", use_container_width=True):
-                st.switch_page("Item Counter")
-                
-        with col3:
-            if st.button("📹 Analyze Video", use_container_width=True):
-                st.switch_page("Video Analysis")
-                
-        with col4:
-            if st.button("⚙️ Configure System", use_container_width=True):
-                st.switch_page("Configuration")
-        
-        # Recent events
-        if st.session_state.events_log:
-            st.subheader("Recent Events")
-            recent_events = st.session_state.events_log[-5:]
-            for event in reversed(recent_events):
-                with st.expander(f"Event at {event.get('timestamp', 'Unknown')}"):
-                    st.write(f"**Description:** {event.get('description', 'No description')}")
-                    st.write(f"**Type:** {event.get('type', 'Motion Detection')}")
-                    if 'image_path' in event:
-                        try:
-                            img = Image.open(event['image_path'])
-                            st.image(img, caption="Captured Frame", width=300)
-                        except:
-                            st.write("Image not available")
-
-    def motion_detection_page(self):
-        """Motion detection interface with live monitoring"""
-        st.header("🎥 Motion Detection System")
-        
-        # Control panel
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("Camera Controls")
+        st.markdown("### 🔧 Quick Actions")
+        if st.button("🔄 Reload Configuration"):
+            # Clear any cached config and reload
+            st.rerun()
             
-            # Camera source selection
-            camera_source = st.radio(
-                "Select Camera Source:",
-                ["Local Camera", "IP Camera"],
-                horizontal=True
+        if st.button("🔌 Test AI Connection"):
+            with st.spinner("Testing AI connection..."):
+                connected, message = test_ai_connection(config)
+                if connected:
+                    st.success(f"✅ {message}")
+                else:
+                    st.error(f"❌ {message}")
+        
+        # Configuration editor
+        with st.expander("⚙️ Quick Config Editor"):
+            st.markdown("**Note:** Changes here are temporary. Edit config.ini for permanent changes.")
+            
+            # Basic config overrides for session
+            if 'config_override' not in st.session_state:
+                st.session_state.config_override = {}
+            
+            temp_model = st.text_input(
+                "AI Model Override:", 
+                value=st.session_state.config_override.get('model', ''),
+                placeholder=config.get('ai', {}).get('model', 'qwen3-vl:32b')
             )
             
-            if camera_source == "IP Camera":
-                ip_url = st.text_input("IP Camera URL:", value=self.config['camera'].get('ip_url', ''))
-                source = ip_url
-            else:
-                device_id = st.number_input("Device ID:", min_value=0, max_value=10, value=0)
-                source = device_id
-                
-            st.session_state.camera_source = source
-        
-        with col2:
-            st.subheader("Detection Settings")
-            min_area = st.slider("Minimum Motion Area:", 100, 2000, self.config['motion_detection']['min_area'])
-            threshold = st.slider("Motion Threshold:", 10, 100, self.config['motion_detection']['threshold'])
-            cooldown = st.slider("Cooldown (seconds):", 10, 300, self.config['motion_detection']['cooldown'])
+            temp_base_url = st.text_input(
+                "Base URL Override:", 
+                value=st.session_state.config_override.get('base_url', ''),
+                placeholder=config.get('ai', {}).get('base_url', 'http://localhost:11434')
+            )
             
-            # Update config with new settings
-            self.config['motion_detection']['min_area'] = min_area
-            self.config['motion_detection']['threshold'] = threshold
-            self.config['motion_detection']['cooldown'] = cooldown
+            if st.button("Apply Temporary Override"):
+                st.session_state.config_override = {
+                    'model': temp_model,
+                    'base_url': temp_base_url
+                }
+                st.success("Temporary configuration applied!")
+                st.rerun()
+    
+    # Main content area
+    tab1, tab2, tab3 = st.tabs(["🔍 Motion Detection", "🔍 Quality Assurance", "📊 Batch Processing"])
+    
+    with tab1:
+        st.markdown('<h2 class="section-header">Motion Detection Agent</h2>', unsafe_allow_html=True)
+        st.markdown("Upload an image to test the motion detection agent for human/person detection.")
         
-        # Start/Stop controls
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns([1, 1])
         
         with col1:
-            if st.button("▶️ Start Detection", use_container_width=True, type="primary"):
-                if not st.session_state.motion_running:
-                    if self.camera_manager:
-                        success = self.camera_manager.start_camera(source)
-                        if success:
-                            st.session_state.motion_running = True
-                            st.success("Motion detection started!")
-                            st.rerun()
-                        else:
-                            st.error("Failed to start camera!")
+            # File upload (prioritize video)
+            uploaded_file = st.file_uploader(
+                "Choose a video or image file",
+                type=['mp4', 'avi', 'mov', 'mkv', 'png', 'jpg', 'jpeg'],
+                key="motion_upload",
+                help="Upload video files for frame analysis or images for single-frame detection"
+            )
+            
+            # Video processing settings
+            if uploaded_file and uploaded_file.type.startswith('video/'):
+                st.markdown("**Video Processing Settings**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    max_frames = st.slider("Max frames to extract", 1, 10, 6)
+                with col_b:
+                    sample_rate = st.slider("Frame sampling rate", 1, 60, 30)
+            
+            # Manual description input
+            manual_description = st.text_area(
+                "Or enter a description manually:",
+                placeholder="Example: Person walking in the hallway",
+                help="You can either upload an image or provide a text description"
+            )
+            
+            # Test button
+            if st.button("🔍 Run Motion Detection", type="primary"):
+                timestamp = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+                
+                if uploaded_file is not None:
+                    # Process uploaded file
+                    file_path = save_uploaded_file(uploaded_file)
+                    
+                    if uploaded_file.type.startswith('video/'):
+                        # Process video file
+                        frames_bytes = extract_video_frames(file_path, max_frames, sample_rate)
+                        description = f"Video analysis: {uploaded_file.name} ({len(frames_bytes)} frames extracted)"
                     else:
-                        st.error("Camera utilities not available!")
-        
-        with col2:
-            if st.button("⏹️ Stop Detection", use_container_width=True):
-                if st.session_state.motion_running:
-                    if self.camera_manager:
-                        self.camera_manager.stop_camera()
-                    st.session_state.motion_running = False
-                    st.success("Motion detection stopped!")
-                    st.rerun()
-        
-        with col3:
-            if st.button("📸 Test Camera", use_container_width=True):
-                self.test_camera_connection()
-        
-        # Status indicators
-        status_col1, status_col2, status_col3 = st.columns(3)
-        
-        with status_col1:
-            camera_status = "Active" if (self.camera_manager and self.camera_manager.is_running()) else "Inactive"
-            st.markdown(create_status_indicator(camera_status.lower(), f"Camera: {camera_status}"), unsafe_allow_html=True)
-        
-        with status_col2:
-            detection_status = "Running" if st.session_state.motion_running else "Stopped"
-            st.markdown(create_status_indicator(detection_status.lower(), f"Detection: {detection_status}"), unsafe_allow_html=True)
-        
-        with status_col3:
-            ai_status = "Connected" if self.config['ai']['base_url'] else "Not Configured"
-            st.markdown(create_status_indicator("active" if ai_status == "Connected" else "warning", f"AI: {ai_status}"), unsafe_allow_html=True)
-        
-        # Live feed display with motion detection
-        if st.session_state.motion_running:
-            if self.camera_manager and self.camera_manager.is_running():
-                st.subheader("Live Camera Feed with Motion Detection")
-                
-                # Create placeholders for live updates
-                frame_placeholder = st.empty()
-                info_placeholder = st.empty()
-                
-                # Get latest frame and process it
-                frame = self.camera_manager.get_latest_frame()
-                
-                if frame is not None:
-                    # Perform motion detection using EyerisAI function
-                    if hasattr(self, 'previous_frame') and self.previous_frame is not None and detect_motion:
-                        motion_detected, contours = detect_motion(self.previous_frame, frame)
-                    else:
-                        motion_detected, contours = False, []
-                        
-                    self.previous_frame = frame.copy()
+                        # Process image file
+                        frames_bytes = convert_image_to_bytes(file_path)
+                        description = f"Image analysis: {uploaded_file.name}"
                     
-                    # Draw visualization
-                    annotated_frame = frame.copy()
-                    if motion_detected and self.config['visualization']['draw_contours']:
-                        cv2.drawContours(
-                            annotated_frame, 
-                            contours, 
-                            -1, 
-                            self.config['visualization']['contour_color'], 
-                            self.config['visualization']['contour_thickness']
-                        )
-                    
-                    # Add timestamp
-                    if self.config['visualization']['draw_timestamp']:
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        cv2.putText(
-                            annotated_frame, 
-                            timestamp, 
-                            (10, 30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 
-                            1, 
-                            self.config['visualization']['timestamp_color'], 
-                            2
-                        )
-                    
-                    # Convert frame for display
-                    frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                    frame_placeholder.image(
-                        frame_rgb, 
-                        caption=f"Live Feed - {'🔴 Motion Detected!' if motion_detected else '🟢 Monitoring'}", 
-                        use_column_width=True
-                    )
-                    
-                    # Show motion info
-                    if motion_detected:
-                        with info_placeholder.container():
-                            st.warning(f"🚨 Motion detected! {len(contours)} moving objects found.")
-                            
-                            # Process with LangGraph motion agent if available
-                            with st.spinner("Analyzing with LangGraph Agent..."):
-                                try:
-                                    # Get frame data for agent
-                                    _, img_bytes = cv2.imencode('.jpg', frame)
-                                    
-                                    # Create temporary image path
-                                    temp_dir = Path("/tmp")
-                                    temp_dir.mkdir(exist_ok=True)
-                                    temp_path = temp_dir / f"motion_{int(time.time())}.jpg"
-                                    cv2.imwrite(str(temp_path), frame)
-                                    
-                                    # Use LangGraph motion agent
-                                    alert_sent = run_motion_agent(
-                                        "Motion detected in surveillance camera", 
-                                        [img_bytes.tobytes()], 
-                                        str(temp_path), 
-                                        datetime.now().isoformat()
-                                    )
-                                    
-                                    st.info("Motion analysis completed by LangGraph agent")
-                                    
-                                    if alert_sent:
-                                        st.success("📧 Alert email sent by agent!")
-                                    else:
-                                        st.info("Agent determined no alert needed")
-                                    
-                                    # Log event
-                                    EventLogger.log_motion_event("Motion detected and processed by LangGraph agent")
-                                    
-                                except Exception as e:
-                                    st.error(f"LangGraph agent analysis failed: {str(e)}")
-                    else:
-                        info_placeholder.empty()
-                else:
-                    frame_placeholder.info("Waiting for camera feed...")
-                
-                # Auto-refresh every 100ms for smooth video
-                time.sleep(0.1)
-                st.rerun()
-            else:
-                st.warning("Camera utilities not available or camera not running")
-        elif st.session_state.motion_running:
-            st.warning("Motion detection is enabled but camera is not running. Please check camera connection.")
-        
-        # Motion detection statistics
-        motion_events = [e for e in st.session_state.events_log if e.get('type') == 'motion']
-        if motion_events:
-            st.subheader("Detection Statistics")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Detections", len(motion_events))
-            with col2:
-                today_events = [e for e in motion_events if 'timestamp' in e and 
-                              datetime.fromisoformat(e['timestamp']).date() == datetime.now().date()]
-                st.metric("Events Today", len(today_events))
-            with col3:
-                alerts_sent = [e for e in motion_events if e.get('alert_sent', False)]
-                st.metric("Alerts Sent", len(alerts_sent))
-
-    def item_counter_page(self):
-        """Item counting interface"""
-        st.header("🔍 Intelligent Item Counter")
-        
-        # File upload section
-        st.subheader("Upload Image")
-        uploaded_file = st.file_uploader(
-            "Choose an image file",
-            type=['png', 'jpg', 'jpeg'],
-            help="Upload an image to count specific items"
-        )
-        
-        if uploaded_file is not None:
-            # Display uploaded image
-            image = Image.open(uploaded_file)
-            
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                st.image(image, caption="Uploaded Image", use_column_width=True)
-            
-            with col2:
-                st.subheader("Counting Parameters")
-                
-                # Item to count
-                item_name = st.text_input(
-                    "What would you like to count?",
-                    placeholder="e.g., people, cars, bottles, etc."
-                )
-                
-                # Custom prompt (optional)
-                custom_prompt = st.text_area(
-                    "Custom Instructions (Optional):",
-                    placeholder="Additional instructions for the AI..."
-                )
-                
-                # Count button
-                if st.button("🔢 Start Counting", use_container_width=True, type="primary"):
-                    if item_name:
-                        with st.spinner(f"Counting {item_name} in the image..."):
+                    if frames_bytes:
+                        with st.spinner("Running motion detection agent..."):
                             try:
-                                # Save uploaded image temporarily
-                                temp_path = f"/tmp/{uploaded_file.name}"
-                                image.save(temp_path)
+                                # Apply effective config to agents
+                                apply_config_to_agents(config, base_config)
                                 
-                                # Count items using EyerisAI function directly
-                                if count_items:
-                                    # EyerisAI.count_items prints results to console
-                                    count_items(temp_path, item_name)
-                                    
-                                    st.success(f"Item counting completed for '{item_name}'. Check console output for results.")
-                                    
-                                    # Log the event (generic since count_items doesn't return values)
-                                    event = {
-                                        'timestamp': datetime.now().isoformat(),
-                                        'type': 'item_count',
-                                        'item': item_name,
-                                        'count': 'See console output',
-                                        'image_path': temp_path,
-                                        'description': f"Item counting performed for '{item_name}' using EyerisAI"
-                                    }
-                                    st.session_state.events_log.append(event)
-                                    
-                                else:
-                                    st.error("EyerisAI count_items function not available.")
-                                    
+                                result = run_motion_agent(
+                                    description=description,
+                                    frames_bytes=frames_bytes,
+                                    image_path=file_path,
+                                    timestamp=timestamp
+                                )
+                                display_results(result, "Motion Detection", description)
                             except Exception as e:
-                                st.error(f"Error during counting: {str(e)}")
+                                st.error(f"Error running motion detection agent: {e}")
                     else:
-                        st.warning("Please specify what you want to count!")
-        
-        # Recent counting results
-        counting_events = [e for e in st.session_state.events_log if e.get('type') == 'item_count']
-        if counting_events:
-            st.subheader("Recent Counting Results")
-            
-            for event in reversed(counting_events[-5:]):
-                with st.expander(f"{event.get('item', 'Unknown')} - {event.get('timestamp', 'Unknown time')}"):
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        st.write(f"**Item:** {event.get('item', 'Unknown')}")
-                        st.write(f"**Count:** {event.get('count', 0)}")
-                        st.write(f"**Description:** {event.get('description', 'No description')}")
-                    with col2:
-                        if 'image_path' in event:
-                            try:
-                                img = Image.open(event['image_path'])
-                                st.image(img, width=200)
-                            except:
-                                st.write("Image not available")
-
-    def configuration_page(self):
-        """Configuration display interface - Read-only view of EyerisAI config"""
-        st.header("⚙️ System Configuration")
-        
-        st.info("📋 **Read-Only Configuration Display** - To modify settings, edit the `config.ini` file directly and restart the application.")
-        
-        if CONFIG:
-            # Display current configuration in tabs
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🤖 AI Settings", "📷 Camera", "🚨 Motion Detection", "📧 Email", "🎨 Visualization"])
-            
-            with tab1:
-                st.subheader("AI Model Configuration")
-                col1, col2 = st.columns(2)
+                        st.error("Failed to extract frames from the uploaded file.")
                 
-                with col1:
-                    st.text_input("API Base URL:", value=CONFIG['ai']['base_url'], disabled=True)
-                    st.text_input("Model Name:", value=CONFIG['ai']['model'], disabled=True)
-                    st.text_input("Agent Model:", value=CONFIG['ai'].get('agent_model', ''), disabled=True)
-                
-                with col2:
-                    st.text_input("API Key:", value="***" if CONFIG['ai'].get('api_key') else "", disabled=True, type="password")
-                    st.number_input("Max Tokens:", value=CONFIG['ai'].get('max_tokens', 300), disabled=True)
-                
-                st.text_area("Default Prompt:", value=CONFIG['ai'].get('prompt', ''), height=100, disabled=True)
-                st.text_area("Motion Analysis Prompt:", value=CONFIG['ai'].get('motion_prompt', ''), height=100, disabled=True)
-            
-            with tab2:
-                st.subheader("Camera Configuration")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.checkbox("Use IP Camera", value=CONFIG['camera'].get('use_ip', False), disabled=True)
-                    if CONFIG['camera'].get('use_ip', False):
-                        st.text_input("IP Camera URL:", value=CONFIG['camera'].get('ip_url', ''), disabled=True)
-                    else:
-                        st.number_input("Device ID:", value=CONFIG['camera'].get('device_id', 0), disabled=True)
-                
-                with col2:
-                    st.number_input("Width:", value=CONFIG['camera'].get('width', 640), disabled=True)
-                    st.number_input("Height:", value=CONFIG['camera'].get('height', 480), disabled=True)
-                    st.slider("Auto Exposure:", 0.0, 1.0, CONFIG['camera'].get('auto_exposure', 0.75), disabled=True)
-            
-            with tab3:
-                st.subheader("Motion Detection Settings")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.number_input("Minimum Area:", value=CONFIG['motion_detection'].get('min_area', 700), disabled=True)
-                    st.number_input("Threshold:", value=CONFIG['motion_detection'].get('threshold', 50), disabled=True)
-                    st.number_input("Cooldown (seconds):", value=CONFIG['motion_detection'].get('cooldown', 60), disabled=True)
-                
-                with col2:
-                    blur_size = CONFIG['motion_detection'].get('blur_size', (21, 21))
-                    st.number_input("Blur Size X:", value=blur_size[0], disabled=True)
-                    st.number_input("Blur Size Y:", value=blur_size[1], disabled=True)
-                    st.number_input("Frames to Capture:", value=CONFIG['motion_detection'].get('n_frames', 2), disabled=True)
-            
-            with tab4:
-                st.subheader("Email Alert Configuration")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.checkbox("Enable Email Alerts", value=CONFIG['email'].get('enabled', False), disabled=True)
-                    st.text_input("SMTP Server:", value=CONFIG['email'].get('smtp_server', ''), disabled=True)
-                    st.number_input("SMTP Port:", value=CONFIG['email'].get('smtp_port', 587), disabled=True)
-                    st.checkbox("Use TLS", value=CONFIG['email'].get('use_tls', True), disabled=True)
-                
-                with col2:
-                    st.text_input("From Address:", value=CONFIG['email'].get('from_address', ''), disabled=True)
-                    st.text_input("To Address:", value=CONFIG['email'].get('to_address', ''), disabled=True)
-                    st.text_input("SMTP Username:", value=CONFIG['email'].get('smtp_username', ''), disabled=True)
-                    st.text_input("SMTP Password:", value="***" if CONFIG['email'].get('smtp_password') else "", disabled=True, type="password")
-            
-            with tab5:
-                st.subheader("Visualization Settings")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.checkbox("Draw Contours", value=CONFIG['visualization'].get('draw_contours', True), disabled=True)
-                    st.checkbox("Draw Timestamp", value=CONFIG['visualization'].get('draw_timestamp', True), disabled=True)
-                
-                with col2:
-                    contour_color = CONFIG['visualization'].get('contour_color', (232, 8, 255))
-                    st.text_input("Contour Color (RGB):", value=f"{contour_color}", disabled=True)
-                    timestamp_color = CONFIG['visualization'].get('timestamp_color', (0, 255, 0))
-                    st.text_input("Timestamp Color (RGB):", value=f"{timestamp_color}", disabled=True)
-                    st.slider("Contour Thickness:", 1, 10, CONFIG['visualization'].get('contour_thickness', 2), disabled=True)
-            
-            st.markdown("---")
-            st.info("💡 **To modify these settings:** Edit the `config.ini` file in the EyerisAI directory and restart the application.")
-            
-        else:
-            st.error("❌ Unable to load EyerisAI configuration. Please check that config.ini exists and is properly formatted.")
-
-    def analytics_page(self):
-        """Analytics and reporting interface"""
-        st.header("📊 Analytics Dashboard")
-        
-        if not st.session_state.events_log:
-            st.info("No events recorded yet. Start using the system to see analytics!")
-            return
-        
-        # Create DataFrame from events
-        df = pd.DataFrame(st.session_state.events_log)
-        
-        # Time-based analytics
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Event Timeline")
-            if 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df['hour'] = df['timestamp'].dt.hour
-                hourly_counts = df.groupby('hour').size()
-                
-                fig_timeline = px.line(
-                    x=hourly_counts.index, 
-                    y=hourly_counts.values,
-                    title="Events by Hour of Day",
-                    labels={'x': 'Hour', 'y': 'Event Count'}
-                )
-                st.plotly_chart(fig_timeline, use_container_width=True)
-        
-        with col2:
-            st.subheader("Event Types")
-            if 'type' in df.columns:
-                type_counts = df['type'].value_counts()
-                
-                fig_types = px.pie(
-                    values=type_counts.values, 
-                    names=type_counts.index,
-                    title="Distribution of Event Types"
-                )
-                st.plotly_chart(fig_types, use_container_width=True)
-        
-        # Item counting analytics
-        counting_events = df[df['type'] == 'item_count'] if 'type' in df.columns else pd.DataFrame()
-        if not counting_events.empty:
-            st.subheader("Item Counting Summary")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                item_summary = counting_events.groupby('item')['count'].sum().sort_values(ascending=False)
-                st.bar_chart(item_summary)
-            
-            with col2:
-                st.write("**Top Counted Items:**")
-                for item, total in item_summary.head(5).items():
-                    st.write(f"• {item}: {total}")
-        
-        # Video analysis analytics
-        video_events = df[df['type'] == 'video_analysis'] if 'type' in df.columns else pd.DataFrame()
-        if not video_events.empty:
-            st.subheader("Video Analysis Summary")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Videos Analyzed", len(video_events))
-            
-            with col2:
-                total_segments = video_events['segments_analyzed'].sum() if 'segments_analyzed' in video_events.columns else 0
-                st.metric("Total Segments", total_segments)
-            
-            with col3:
-                if 'analysis_type' in video_events.columns:
-                    most_common = video_events['analysis_type'].mode().iloc[0] if not video_events['analysis_type'].mode().empty else "N/A"
-                    st.metric("Most Used Analysis", most_common)
-        
-        # Motion detection analytics
-        motion_events = df[df['type'] == 'motion'] if 'type' in df.columns else pd.DataFrame()
-        if not motion_events.empty:
-            st.subheader("Motion Detection Summary")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total Motion Events", len(motion_events))
-            
-            with col2:
-                alerts_sent = motion_events.get('alert_sent', pd.Series()).sum()
-                st.metric("Alerts Sent", alerts_sent if pd.notna(alerts_sent) else 0)
-            
-            with col3:
-                if 'timestamp' in motion_events.columns:
-                    today_events = motion_events[motion_events['timestamp'].dt.date == datetime.now().date()]
-                    st.metric("Events Today", len(today_events))
-
-    def video_analysis_page(self):
-        """Video analysis interface for quality assurance and defect detection"""
-        st.header("📹 Video Analysis & Quality Control")
-        
-        st.markdown("""
-        Upload a video file to analyze it frame by frame. This is useful for:
-        - Quality control in production lines
-        - Defect detection in manufacturing
-        - Safety monitoring
-        - Process analysis
-        """)
-        
-        # Video upload section
-        st.subheader("Upload Video File")
-        uploaded_video = st.file_uploader(
-            "Choose a video file",
-            type=['mp4', 'avi', 'mov', 'mkv', 'webm'],
-            help="Upload a video file for frame-by-frame analysis"
-        )
-        
-        if uploaded_video is not None:
-            # Save uploaded video temporarily
-            temp_video_path = f"/tmp/{uploaded_video.name}"
-            with open(temp_video_path, "wb") as f:
-                f.write(uploaded_video.read())
-            
-            # Video info and parameters
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                # Display video info
-                try:
-                    cap = cv2.VideoCapture(temp_video_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    duration = total_frames / fps if fps > 0 else 0
-                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    cap.release()
-                    
-                    st.info(f"""
-                    **Video Information:**
-                    - Duration: {duration:.2f} seconds
-                    - FPS: {fps:.1f}
-                    - Resolution: {width}x{height}
-                    - Total Frames: {total_frames}
-                    """)
-                    
-                except Exception as e:
-                    st.error(f"Could not read video file: {str(e)}")
-                    return
-            
-            with col2:
-                st.subheader("Analysis Parameters")
-                
-                # Number of frames to extract
-                n_frames = st.slider(
-                    "Frames to Extract per Segment:",
-                    min_value=1,
-                    max_value=10,
-                    value=4,
-                    help="Number of frames to extract from each time segment"
-                )
-                
-                # Time interval
-                interval_options = {
-                    "Entire video": 0.0,
-                    "Every 5 seconds": 5.0,
-                    "Every 10 seconds": 10.0,
-                    "Every 30 seconds": 30.0,
-                    "Every minute": 60.0,
-                    "Custom": -1
-                }
-                
-                interval_choice = st.selectbox(
-                    "Analysis Interval:",
-                    list(interval_options.keys()),
-                    help="How often to extract frames for analysis"
-                )
-                
-                if interval_choice == "Custom":
-                    interval_sec = st.number_input(
-                        "Custom interval (seconds):",
-                        min_value=0.1,
-                        max_value=duration,
-                        value=10.0
-                    )
-                else:
-                    interval_sec = interval_options[interval_choice]
-                
-                # Analysis prompt
-                st.subheader("Analysis Instructions")
-                
-                # Predefined prompts
-                prompt_templates = {
-                    "Quality Control": """
-                    Analyze these video frames for quality control. Look for:
-                    - Product defects or irregularities
-                    - Items in wrong positions
-                    - Process anomalies
-                    Report findings in JSON format with frame numbers as keys.
-                    """,
-                    "Safety Monitoring": """
-                    Analyze these frames for safety issues:
-                    - Unsafe conditions
-                    - Equipment malfunctions
-                    - Personnel safety violations
-                    Report any safety concerns in JSON format.
-                    """,
-                    "Production Line": """
-                    Monitor this production line footage:
-                    - Items moving correctly on conveyor
-                    - No jams or blockages
-                    - Proper item positioning
-                    Report status in JSON format with frame analysis.
-                    """,
-                    "Custom": ""
-                }
-                
-                prompt_choice = st.selectbox(
-                    "Analysis Type:",
-                    list(prompt_templates.keys())
-                )
-                
-                # Always allow editing of the prompt, but pre-populate with template if selected
-                if prompt_choice == "Custom":
-                    initial_prompt = ""
-                    placeholder_text = "Enter your specific analysis instructions here..."
-                else:
-                    initial_prompt = prompt_templates[prompt_choice]
-                    placeholder_text = "You can edit this template or write your own instructions..."
-                
-                analysis_prompt = st.text_area(
-                    "Analysis Instructions:",
-                    value=initial_prompt,
-                    height=100,
-                    placeholder=placeholder_text,
-                    help="Edit this prompt to customize how the AI analyzes your video frames"
-                )
-            
-            # Analysis button
-            if st.button("🎬 Start Video Analysis", use_container_width=True, type="primary"):
-                if not analysis_prompt.strip():
-                    st.warning("Please provide analysis instructions!")
-                    return
-                
-                # Progress tracking
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                results_container = st.container()
-                
-                try:
-                    # Process video
-                    results = self.process_video_analysis(
-                        temp_video_path, 
-                        n_frames, 
-                        interval_sec, 
-                        analysis_prompt,
-                        progress_bar,
-                        status_text
-                    )
-                    
-                    # Display results
-                    with results_container:
-                        st.subheader("Analysis Results")
-                        
-                        if results:
-                            for i, result in enumerate(results):
-                                with st.expander(f"Segment {i+1}: {result.get('timerange', 'Unknown time')}"):
-                                    col1, col2 = st.columns([2, 1])
-                                    
-                                    with col1:
-                                        st.write("**AI Analysis:**")
-                                        st.write(result.get('description', 'No analysis available'))
-                                        
-                                        # Show QA agent result if available
-                                        if result.get('qa_result'):
-                                            if result['qa_result']:
-                                                st.error("⚠️ Issue detected by QA agent!")
-                                            else:
-                                                st.success("✅ No issues detected")
-                                    
-                                    with col2:
-                                        # Display extracted frames
-                                        if 'frames' in result:
-                                            for j, frame_path in enumerate(result['frames']):
-                                                try:
-                                                    img = Image.open(frame_path)
-                                                    st.image(img, caption=f"Frame {j+1}", width=200)
-                                                except:
-                                                    st.write(f"Frame {j+1}: Not available")
-                            
-                            # Log the video analysis event
-                            event = {
-                                'timestamp': datetime.now().isoformat(),
-                                'type': 'video_analysis',
-                                'video_file': uploaded_video.name,
-                                'segments_analyzed': len(results),
-                                'analysis_type': prompt_choice,
-                                'description': f"Analyzed {len(results)} segments from {uploaded_video.name}"
-                            }
-                            st.session_state.events_log.append(event)
-                        else:
-                            st.warning("No results generated from video analysis")
-                
-                except Exception as e:
-                    st.error(f"Video analysis failed: {str(e)}")
-                finally:
-                    progress_bar.empty()
-                    status_text.empty()
-
-    def process_video_analysis(self, video_path, n_frames, interval_sec, prompt, progress_bar, status_text):
-        """Process video analysis similar to the command line version"""
-        results = []
-        
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                raise Exception(f"Failed to open video file: {video_path}")
-            
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
-            
-            if fps <= 0 or total_frames <= 0:
-                raise Exception("Invalid video file or unable to read FPS/frames")
-            
-            # If interval is 0.0, use entire video duration
-            if interval_sec == 0.0:
-                interval_sec = duration
-            
-            segment = 0
-            start_time = 0.0
-            total_segments = max(1, int(duration / interval_sec))
-            
-            while start_time < duration:
-                # Update progress
-                progress = min(segment / total_segments, 1.0)
-                progress_bar.progress(progress)
-                status_text.text(f"Processing segment {segment + 1}/{total_segments}...")
-                
-                # Calculate frame indices for this segment
-                if n_frames > 1:
-                    frame_indices = [
-                        int((start_time + i * interval_sec / (n_frames - 1)) * fps) 
-                        for i in range(n_frames)
-                    ]
-                    frame_indices = [min(idx, total_frames - 1) for idx in frame_indices]
-                else:
-                    frame_indices = [int(start_time * fps)]
-                
-                # Extract frames
-                frames_bytes = []
-                frame_paths = []
-                
-                for frame_num, idx in enumerate(frame_indices):
-                    if idx >= total_frames:
-                        continue
-                    
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    ret, frame = cap.read()
-                    
-                    if ret and frame is not None:
-                        # Encode frame
-                        success, jpg = cv2.imencode('.jpg', frame)
-                        if success:
-                            frames_bytes.append(jpg.tobytes())
-                            
-                            # Save frame
-                            save_dir = Path(CONFIG.get('save_directory', 'captures'))
-                            save_dir.mkdir(exist_ok=True)
-                            frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
-                            cv2.imwrite(str(frame_filename), frame)
-                            frame_paths.append(str(frame_filename))
-                
-                # Analyze frames if we have any
-                if frames_bytes:
-                    try:
-                        # Get AI description using EyerisAI function
-                        if describe_frames:
-                            description = describe_frames(frames_bytes, prompt)
-                        else:
-                            description = "AI analysis not available"
-                        
-                        # Try QA analysis with LangGraph agent if available
-                        qa_result = None
+                elif manual_description.strip():
+                    # Process manual description
+                    with st.spinner("Running motion detection agent..."):
                         try:
-                            qa_result = run_qa_agent(
-                                description, 
-                                frames_bytes, 
-                                frame_paths[0] if frame_paths else video_path, 
-                                f"segment_{segment+1}"
+                            # Apply effective config to agents
+                            apply_config_to_agents(config, base_config)
+                            
+                            result = run_motion_agent(
+                                description=manual_description,
+                                frames_bytes=[],
+                                image_path="",
+                                timestamp=timestamp
                             )
-                            print(f"QA agent result for segment {segment+1}: {qa_result}")
+                            display_results(result, "Motion Detection", manual_description)
                         except Exception as e:
-                            print(f"QA agent error for segment {segment+1}: {str(e)}")
-                            qa_result = None  # QA agent not available
-                        
-                        # Store results
-                        timerange = f"{start_time:.2f}s - {min(start_time + interval_sec, duration):.2f}s"
-                        results.append({
-                            'segment': segment + 1,
-                            'timerange': timerange,
-                            'description': description,
-                            'qa_result': qa_result,
-                            'frames': frame_paths,
-                            'frame_count': len(frames_bytes)
-                        })
-                        
-                    except Exception as e:
-                        st.warning(f"Failed to analyze segment {segment + 1}: {str(e)}")
-                
-                segment += 1
-                start_time += interval_sec
-            
-            cap.release()
-            progress_bar.progress(1.0)
-            status_text.text("Analysis complete!")
-            
-        except Exception as e:
-            raise Exception(f"Video processing failed: {str(e)}")
-        
-        return results
-
-    # describe_frames_ui removed - using EyerisAI.describe_frames instead
-
-    def event_logs_page(self):
-        """Event logs viewer"""
-        st.header("📋 Event Logs")
-        
-        if not st.session_state.events_log:
-            st.info("No events recorded yet.")
-            return
-        
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            event_types = list(set([e.get('type', 'unknown') for e in st.session_state.events_log]))
-            selected_types = st.multiselect("Filter by Event Type:", event_types, default=event_types)
+                            st.error(f"Error running motion detection agent: {e}")
+                else:
+                    st.warning("Please upload an image or provide a description.")
         
         with col2:
-            date_filter = st.date_input("Filter by Date:", value=datetime.now().date())
-        
-        with col3:
-            if st.button("🗑️ Clear All Logs"):
-                st.session_state.events_log = []
-                st.success("All logs cleared!")
-                st.rerun()
-        
-        # Display filtered events
-        filtered_events = []
-        for event in st.session_state.events_log:
-            if event.get('type') in selected_types:
-                event_date = datetime.fromisoformat(event['timestamp']).date() if 'timestamp' in event else None
-                if event_date == date_filter or date_filter is None:
-                    filtered_events.append(event)
-        
-        if filtered_events:
-            st.subheader(f"Showing {len(filtered_events)} events")
-            
-            for i, event in enumerate(reversed(filtered_events)):
-                with st.expander(f"Event {len(filtered_events)-i}: {event.get('type', 'Unknown')} - {event.get('timestamp', 'Unknown time')}"):
-                    col1, col2 = st.columns([2, 1])
+            if uploaded_file is not None:
+                st.markdown("### Preview")
+                if uploaded_file.type.startswith('video/'):
+                    st.video(uploaded_file, start_time=0)
+                    st.caption(f"Video: {uploaded_file.name}")
                     
-                    with col1:
-                        st.json(event)
-                    
-                    with col2:
-                        if 'image_path' in event:
-                            try:
-                                img = Image.open(event['image_path'])
-                                st.image(img, caption="Event Image", width=200)
-                            except:
-                                st.write("Image not available")
-        
-        else:
-            st.info("No events match the selected filters.")
-
-    def start_motion_detection_thread(self):
-        """Start motion detection in a separate thread"""
-        def run_detection():
-            try:
-                # This is a simplified version - in production you'd want proper thread management
-                from EyerisAI import run_motion_detection
-                run_motion_detection()
-            except Exception as e:
-                st.error(f"Motion detection error: {str(e)}")
-        
-        if not st.session_state.motion_running:
-            return
-            
-        thread = threading.Thread(target=run_detection, daemon=True)
-        thread.start()
-
-    def test_camera_connection(self):
-        """Test camera connection"""
-        try:
-            source = st.session_state.get('camera_source', 0)
-            
-            # Test connection
-            if isinstance(source, str):  # IP camera
-                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-            else:  # Local camera
-                cap = cv2.VideoCapture(source)
-            
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret:
-                    st.success("✅ Camera connection successful!")
-                    
-                    # Display test frame
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    st.image(frame_rgb, caption="Test Frame", width=400)
-                    
-                    # Show camera info
-                    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    
-                    st.info(f"Camera Resolution: {int(width)}x{int(height)}, FPS: {fps:.1f}")
+                    # Show extracted frames if video is processed
+                    if st.button("Preview Extracted Frames"):
+                        temp_path = save_uploaded_file(uploaded_file)
+                        preview_frames = extract_video_frames(temp_path, max_frames=3)
+                        if preview_frames:
+                            st.markdown("**Sample Extracted Frames:**")
+                            cols = st.columns(len(preview_frames))
+                            for i, frame_bytes in enumerate(preview_frames):
+                                with cols[i]:
+                                    st.image(frame_bytes, caption=f"Frame {i+1}", use_column_width=True)
                 else:
-                    st.error("❌ Could not read frame from camera")
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption=f"Image: {uploaded_file.name}", use_column_width=True)
             else:
-                st.error("❌ Could not connect to camera")
+                st.markdown("### Instructions")
+                st.info("""
+                **Motion Detection Agent** analyzes videos, images or descriptions to detect human presence.
+                
+                **Video Processing (Primary):**
+                - Upload video files (MP4, AVI, MOV, MKV)
+                - Automatically extracts frames for analysis
+                - Adjustable frame sampling settings
+                
+                **Image Processing (Fallback):**
+                - Upload image files (PNG, JPG, JPEG)
+                - Single frame analysis
+                
+                **Manual Input:**
+                - Provide text descriptions for testing
+                
+                The agent analyzes all frames/content to determine if humans are detected and triggers email alerts accordingly.
+                """)
+    
+    with tab2:
+        st.markdown('<h2 class="section-header">Quality Assurance Agent</h2>', unsafe_allow_html=True)
+        st.markdown("Test the QA agent to analyze frame descriptions for quality issues.")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            # Frame descriptions input
+            frame_descriptions = st.text_area(
+                "Frame Descriptions (JSON format):",
+                value='{\n  "frame_1": "Normal production line operation",\n  "frame_2": "Products piling up high near conveyor",\n  "frame_3": "Potential issue detected - items can fall"\n}',
+                height=200,
+                help="Provide frame descriptions in JSON format where keys are frame numbers and values are descriptions"
+            )
             
-            cap.release()
+            # Test button
+            if st.button("🔍 Run QA Analysis", type="primary"):
+                timestamp = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+                
+                try:
+                    # Parse JSON
+                    frame_data = json.loads(frame_descriptions)
+                    description = json.dumps(frame_data)
+                    
+                    with st.spinner("Running QA agent..."):
+                        try:
+                            # Apply effective config to agents
+                            apply_config_to_agents(config, base_config)
+                            
+                            result = run_qa_agent(
+                                description=description,
+                                frames_bytes=[],
+                                image_path="",
+                                timestamp=timestamp
+                            )
+                            display_results(result, "Quality Assurance", "Frame analysis completed")
+                        except Exception as e:
+                            st.error(f"Error running QA agent: {e}")
+                
+                except json.JSONDecodeError as e:
+                    st.error(f"Invalid JSON format: {e}")
+        
+        with col2:
+            st.markdown("### Instructions")
+            st.info("""
+            **Quality Assurance Agent** analyzes frame descriptions to detect quality issues.
             
-        except Exception as e:
-            st.error(f"❌ Camera test failed: {str(e)}")
+            - Provide frame descriptions in JSON format
+            - The agent looks for keywords indicating problems
+            - Keywords include: "issue", "problem", "piling up high", "can fall", etc.
+            - If issues are detected, an alert would be triggered
+            """)
+            
+            st.markdown("### Example Issues")
+            st.warning("""
+            The QA agent will detect these types of issues:
+            - Products piling up dangerously
+            - Items that can fall
+            - Production line problems
+            - Safety concerns
+            - Quality defects
+            """)
+    
+    with tab3:
+        st.markdown('<h2 class="section-header">Batch Processing</h2>', unsafe_allow_html=True)
+        st.markdown("Process multiple images or descriptions at once.")
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            # Multiple file upload
+            uploaded_files = st.file_uploader(
+                "Choose multiple video or image files",
+                type=['mp4', 'avi', 'mov', 'mkv', 'png', 'jpg', 'jpeg'],
+                accept_multiple_files=True,
+                key="batch_upload",
+                help="Upload videos for multi-frame analysis or images for single-frame detection"
+            )
+            
+            # Batch descriptions
+            batch_descriptions = st.text_area(
+                "Or enter multiple descriptions (one per line):",
+                placeholder="Person in hallway\nEmpty room\nCrowd gathering",
+                height=150
+            )
+            
+            # Agent selection
+            agent_type = st.selectbox(
+                "Select Agent Type:",
+                ["Motion Detection", "Quality Assurance"]
+            )
+            
+            # Batch process button
+            if st.button("🚀 Run Batch Processing", type="primary"):
+                timestamp = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+                results = []
+                
+                if uploaded_files:
+                    # Process uploaded files
+                    progress_bar = st.progress(0)
+                    
+                    # Apply effective config to agents once for batch processing
+                    apply_config_to_agents(config, base_config)
+                    
+                    for i, file in enumerate(uploaded_files):
+                        progress_bar.progress((i + 1) / len(uploaded_files))
+                        
+                        file_path = save_uploaded_file(file)
+                        
+                        if file.type.startswith('video/'):
+                            frames_bytes = extract_video_frames(file_path, max_frames=6)
+                            description = f"Video: {file.name} ({len(frames_bytes)} frames)"
+                        else:
+                            frames_bytes = convert_image_to_bytes(file_path)
+                            description = f"Image: {file.name}"
+                        
+                        try:
+                            if agent_type == "Motion Detection":
+                                result = run_motion_agent(description, frames_bytes, file_path, timestamp)
+                            else:
+                                result = run_qa_agent(description, frames_bytes, file_path, timestamp)
+                            
+                            results.append({
+                                "file": file.name,
+                                "description": description,
+                                "result": result,
+                                "agent": agent_type
+                            })
+                        except Exception as e:
+                            st.error(f"Error processing {file.name}: {e}")
+                
+                elif batch_descriptions.strip():
+                    # Process descriptions
+                    descriptions = [desc.strip() for desc in batch_descriptions.split('\n') if desc.strip()]
+                    progress_bar = st.progress(0)
+                    
+                    # Apply effective config to agents once for batch processing
+                    apply_config_to_agents(config, base_config)
+                    
+                    for i, desc in enumerate(descriptions):
+                        progress_bar.progress((i + 1) / len(descriptions))
+                        
+                        try:
+                            if agent_type == "Motion Detection":
+                                result = run_motion_agent(desc, [], "", timestamp)
+                            else:
+                                result = run_qa_agent(desc, [], "", timestamp)
+                            
+                            results.append({
+                                "file": f"Description {i+1}",
+                                "description": desc,
+                                "result": result,
+                                "agent": agent_type
+                            })
+                        except Exception as e:
+                            st.error(f"Error processing description {i+1}: {e}")
+                
+                # Display results
+                if results:
+                    st.markdown("### Batch Results")
+                    alerts_triggered = sum(1 for r in results if r["result"])
+                    
+                    # Summary metrics
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        st.metric("Total Processed", len(results))
+                    with col_b:
+                        st.metric("Alerts Triggered", alerts_triggered)
+                    with col_c:
+                        st.metric("Success Rate", f"{(alerts_triggered/len(results)*100):.1f}%")
+                    
+                    # Detailed results
+                    for result in results:
+                        status = "🔥 Alert" if result["result"] else "✅ Normal"
+                        st.markdown(f"**{result['file']}**: {status} - {result['description'][:100]}{'...' if len(result['description']) > 100 else ''}")
+                
+                else:
+                    st.warning("Please upload files or provide descriptions.")
+        
+        with col2:
+            if uploaded_files:
+                st.markdown("### Preview")
+                for file in uploaded_files[:3]:  # Show first 3 files
+                    if file.type.startswith('video/'):
+                        st.video(file, start_time=0)
+                        st.caption(f"Video: {file.name}")
+                    else:
+                        image = Image.open(file)
+                        st.image(image, caption=f"Image: {file.name}", use_column_width=True)
+                if len(uploaded_files) > 3:
+                    st.markdown(f"... and {len(uploaded_files) - 3} more files")
+            else:
+                st.markdown("### Batch Processing")
+                st.info("""
+                **Batch Processing** allows you to:
+                
+                - Upload multiple videos and images at once
+                - Automatic frame extraction from videos
+                - Process multiple descriptions simultaneously
+                - Choose between Motion Detection and QA agents
+                - Get summary statistics and detailed results
+                - Efficient processing of large datasets
+                - Mixed video/image processing support
+                """)
 
-    # save_configuration removed - config editing should be done directly in config.ini
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        '<div style="text-align: center; color: #666; padding: 1rem;">🤖 EyerisAI Workflow Agent - Powered by LangGraph & Streamlit</div>',
+        unsafe_allow_html=True
+    )
 
-# Run the application
 if __name__ == "__main__":
-    app = StreamlitEyerisAI()
-    app.main()
+    main()
