@@ -469,8 +469,10 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
             sent = run_motion_agent(description, frames_bytes, image_path, timestamp)
         if sent:
             print("Agent decided to send email and email was sent.")
+            return True
         else:
             print("Agent decided NOT to send email.")
+            return False
     except Exception as e:
         print(f"Agent invocation failed: {e}. Falling back to simple LLM decision.")
         try:
@@ -479,10 +481,13 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
                 from my_agent import send_email_alert_tool
                 send_email_alert_tool(image_path=str(image_path), description=description, timestamp=timestamp, frames_bytes=frames_bytes[:6])
                 print("Fallback: Sent email based on simple LLM/heuristic decision.")
+                return True
             else:
                 print("Fallback: Decided not to send email.")
+                return False
         except Exception as e2:
             print(f"Fallback also failed: {e2}")
+            return False
 
 def run_motion_detection(prompt=''):
     """
