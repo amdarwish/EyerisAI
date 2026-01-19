@@ -1,13 +1,93 @@
 ![EyerisAI-Mac-M4-Mini](images/EyerisAI-banner-image2.png)
 
 # EyerisAI 🧿
-AI powered camera and event detection system
+AI powered camera and event detection system with web interface
 
 ## What is EyerisAI?
 
-EyerisAI (pronounced “IrisAI”, 👁️ + 🤖) is a project to create an AI-powered camera and event detection system that uses a computer, webcam, computer vision, and a multi-modal LLM (💻 + 📷 + 👁️ + 🤖) to “watch” for specific events in real time. When it detects an event, EyerisAI uses generative AI to analyze the scene, log the findings, and respond, either by speaking aloud (TTS) or sending an email alert. You simply configure a prompt that tells the AI what to look for and how to react.
+EyerisAI (pronounced "IrisAI", 👁️ + 🤖) is a project to create an AI-powered camera and event detection system that uses a computer, webcam, computer vision, and a multi-modal LLM (💻 + 📷 + 👁️ + 🤖) to "watch" for specific events in real time. When it detects an event, EyerisAI uses generative AI to analyze the scene, log the findings, and respond, either by speaking aloud (TTS) or sending an email alert.
 
-The projects is currently functional but still evolving, EyerisAI can be made more versatile in the future, potentially integrating with webhooks, running commands, or interacting with home automation systems *(send me a PR if you are interested in helping improve it)*. Think of it as an intelligent, customizable surveillance tool that not only watches but actively interprets and responds to what it sees.
+This system now includes both a command-line interface and a modern **web-based frontend** with three specialized use cases:
+- **Security**: Motion detection for restricted area access
+- **Trash Monitoring**: Smart bin status monitoring and overflow detection
+- **Production Line**: Conveyor belt anomaly detection for quality control
+
+The system features a React frontend for easy interaction and a FastAPI backend for real-time AI analysis.
+
+## 🏗️ Project Structure
+
+```
+EyerisAI/
+├── backend/                 # Backend Python API
+│   ├── api_server.py       # Main FastAPI server
+│   ├── EyerisAI.py         # Core vision processing
+│   ├── my_agent.py         # AI agent logic
+│   ├── config.ini          # Configuration file
+│   ├── requirements-core.txt # Python dependencies
+│   └── __init__.py         # Python package marker
+├── Frontend/               # React frontend
+│   ├── src/                # React source code
+│   ├── package.json        # Node.js dependencies
+│   └── .env                # Frontend environment
+├── launcher.py             # Python launcher script
+├── dev-backend.sh          # Backend development script
+└── README.md              # This file
+```
+
+## 🚀 Quick Start
+
+### Option 1: Full System (Recommended)
+```bash
+python launcher.py
+```
+This starts the backend API server with comprehensive logging and monitoring.
+
+### Option 2: Development Mode
+```bash
+# Backend only (with auto-reload)
+./dev-backend.sh
+
+# Frontend only (separate terminal)
+cd Frontend
+npm install
+npm run dev
+```
+
+## 🌐 Access Points
+
+- **Backend API**: http://localhost:8000
+- **API Documentation**: http://localhost:8000/docs
+- **Frontend UI**: http://localhost:5173 (when running frontend)
+- **System Status**: http://localhost:8000/status
+
+## 📋 Specialized Use Cases
+
+### 1. **Security (Motion Detection)**
+- **Mode**: Live camera monitoring
+- **Purpose**: Detects unauthorized access to restricted areas
+- **Features**: Real-time motion detection with email alerts
+- **Endpoint**: `POST /motion/start`, `POST /motion/stop`
+
+### 2. **Trash Bin Monitoring**
+- **Mode**: Video upload analysis
+- **Purpose**: Monitors trash bin status and overflow conditions
+- **Features**: Upload videos for smart analysis
+- **Endpoint**: `POST /video/analyze` (use_case: trash)
+
+### 3. **Production Line Monitoring**
+- **Mode**: Video upload analysis  
+- **Purpose**: Detects bottle positioning anomalies on conveyor belt
+- **Features**: Quality control for manufacturing processes
+- **Endpoint**: `POST /video/analyze` (use_case: bottles)
+
+## ⚙️ Configuration
+
+Backend configuration is stored in `backend/config.ini`:
+
+- **AI Settings**: Model, API endpoints, prompts for each use case
+- **Camera Settings**: Device ID, IP camera, resolution
+- **Email Alerts**: SMTP configuration for notifications
+- **Motion Detection**: Sensitivity, thresholds, cooldowns
 
 ## Potential Use Cases
 
@@ -84,13 +164,16 @@ Clone this repository to the system you want to run EyerisAI on:
 
 ```bash
 git clone https://github.com/robert-mcdermott/EyerisAI.git
+cd EyerisAI
 ```
+
+### Backend Dependencies
 
 If you are using ***pip*** 
 
 ```bash
-cd EyerisAI
-pip install -r requirements.txt
+cd backend
+pip install -r requirements-core.txt
 ```
 
 Alternatively, if you are cool 😎, and are using ***uv***:
@@ -99,9 +182,18 @@ Alternatively, if you are cool 😎, and are using ***uv***:
 uv sync
 ```
 
+### Frontend Dependencies (Optional)
+
+For the web interface:
+
+```bash
+cd Frontend
+npm install
+```
+
 ## Configure
 
-Edit the ***config.ini*** file to suit you needs. Here are some of the most likely variables you'll want to change:
+Edit the ***backend/config.ini*** file to suit your needs. Here are some of the most likely variables you'll want to change:
 
 Update the name of this camera, where it's located, what it's purpose it or something to identify it:
 
@@ -154,19 +246,73 @@ If you will be running the AI inference locally on the system with the camera an
 
 ## Running 
 
-Now that all the dependencies are satisfied and you have adjusted the configuration to your specific use case.
+### Method 1: Using the Launcher (Recommended)
 
-To run via Python:
+The Python launcher provides the easiest way to start the system:
 
 ```bash
-python EyerisAI.py
+python launcher.py
+```
+
+This will:
+- Check all configuration files
+- Start the FastAPI backend server
+- Provide comprehensive logging
+- Handle port cleanup automatically
+
+### Method 2: Development Mode
+
+For development with auto-reload:
+
+```bash
+./dev-backend.sh
+```
+
+### Method 3: Manual Startup
+
+To run the original command-line interface:
+
+```bash
+python backend/EyerisAI.py
 ```
 
 Or for the cool 😎 ***uv*** folks:
 
 ```bash
-uv run EyerisAI.py
+uv run backend/EyerisAI.py
 ```
+
+### Frontend (Optional)
+
+To run the web interface (in a separate terminal):
+
+```bash
+cd Frontend
+npm run dev
+```
+
+Then visit http://localhost:5173 to use the web interface.
+
+## 🔧 API Endpoints
+
+- `GET /status` - System status and configuration
+- `POST /motion/detect` - Analyze single image for motion
+- `POST /video/analyze` - Analyze video for trash/production issues  
+- `POST /count/items` - Count specific items in images
+- `GET /logs` - Retrieve system logs
+
+## 🐛 Troubleshooting
+
+### Common Issues
+1. **Port 8000 already in use**: The launcher automatically kills existing processes
+2. **Module import errors**: Ensure you're running from the root directory
+3. **Camera not available**: Normal for development, check backend/config.ini for camera settings
+4. **Dependencies missing**: Run `pip install -r backend/requirements-core.txt`
+
+### Development Tips
+- Use `python launcher.py` for the most reliable startup experience
+- Check logs for detailed error messages
+- API documentation available at http://localhost:8000/docs
 
 ## Output
 

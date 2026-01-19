@@ -1,0 +1,16 @@
+# Backend API dependencies for EyerisAI
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+opencv-python==4.8.1.78
+numpy==1.24.3
+Pillow==10.0.1
+requests==2.31.0
+python-dotenv==1.0.0
+
+# Existing dependencies from your project
+pyttsx3>=2.90
+configparser>=6.0.0
+pathlib>=1.0.1
+langgraph>=0.0.40
+langchain-core>=0.1.0
