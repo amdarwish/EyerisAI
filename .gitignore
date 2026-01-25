@@ -11,3 +11,6 @@ wheels/
 
 # EyerisAI captured images and logs
 captures/
+logs/
+venv/
+images/

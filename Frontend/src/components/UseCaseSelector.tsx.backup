@@ -1,0 +1,142 @@
+import { CheckCircle2, Trash2, Package, Eye, Users, Shield } from 'lucide-react';
+
+export interface UseCase {
+  id: string;
+  name: string;
+  description: string;
+  icon: 'bottle' | 'trash' | 'motion' | 'people' | 'security' | 'quality';
+  prompt: string;
+}
+
+interface UseCaseSelectorProps {
+  selectedUseCase: UseCase | null;
+  onSelect: (useCase: UseCase) => void;
+}
+
+const useCases: UseCase[] = [
+  {
+    id: 'motion-detection',
+    name: 'Human Motion Detection',
+    description: 'Detects human presence and movement in surveillance areas',
+    icon: 'motion',
+    prompt: 'Analyze the frames for human presence and movement. Detect if any people are visible in the surveillance area.',
+  },
+  {
+    id: 'bottle-anomaly',
+    name: 'Bottle Pattern Anomaly Detection',
+    description: 'Detects irregularities in bottle arrangements on production lines',
+    icon: 'bottle',
+    prompt: 'Analyze the video feed for any anomalies in bottle patterns on the production line. Detect missing bottles, incorrect positioning, or damaged containers.',
+  },
+  {
+    id: 'trash-overflow',
+    name: 'Trash Bin Overflow Detection',
+    description: 'Monitors trash bins for overflow conditions',
+    icon: 'trash',
+    prompt: 'Monitor trash bins in the video for overflow conditions. Detect when bins are full or when items are placed outside the bin area.',
+  },
+  {
+    id: 'quality-control',
+    name: 'Quality Control Analysis',
+    description: 'General quality control monitoring for manufacturing processes',
+    icon: 'quality',
+    prompt: 'Analyze the video frames for quality control. Look for defects, irregularities, unsafe conditions, or process anomalies that require attention.',
+  },
+  {
+    id: 'people-counting',
+    name: 'People Counting & Tracking',
+    description: 'Counts people in areas for occupancy monitoring',
+    icon: 'people',
+    prompt: 'Count the number of people visible in each frame. Track occupancy levels and detect overcrowding conditions.',
+  },
+  {
+    id: 'security-monitoring',
+    name: 'Security & Safety Monitoring',
+    description: 'Monitors for security threats and safety violations',
+    icon: 'security',
+    prompt: 'Monitor for security threats, unauthorized access, safety violations, or emergency situations that require immediate attention.',
+  },
+];
+
+export default function UseCaseSelector({ selectedUseCase, onSelect }: UseCaseSelectorProps) {
+  const getIcon = (iconType: UseCase['icon']) => {
+    const iconProps = { size: 24, className: "text-primary" };
+    
+    switch (iconType) {
+      case 'bottle':
+        return <Package {...iconProps} />;
+      case 'trash':
+        return <Trash2 {...iconProps} />;
+      case 'motion':
+        return <Eye {...iconProps} />;
+      case 'people':
+        return <Users {...iconProps} />;
+      case 'security':
+        return <Shield {...iconProps} />;
+  };
+
+  return (
+    <div className="bg-primary-800 rounded-xl border border-primary-700 p-6">
+      <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <CheckCircle2 className="w-5 h-5 text-accent-cyan" />
+        Use Case Selection
+      </h2>
+
+      <div className="space-y-3">
+        {useCases.map((useCase) => {
+          const isSelected = selectedUseCase?.id === useCase.id;
+
+          return (
+            <button
+              key={useCase.id}
+              onClick={() => onSelect(useCase)}
+              className={`w-full text-left p-4 rounded-lg border transition-all ${
+                isSelected
+                  ? 'bg-accent-blue/20 border-accent-cyan shadow-lg shadow-accent-cyan/20'
+                  : 'bg-primary-900/50 border-primary-700 hover:border-primary-600 hover:bg-primary-900'
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                    isSelected ? 'bg-accent-cyan/20' : 'bg-primary-800'
+                  }`}
+                >
+                  <div
+                    className={`w-5 h-5 ${
+                      isSelected ? 'text-accent-cyan' : 'text-primary-400'
+                    }`}
+                  >
+                    {getIcon(useCase.icon)}
+                  </div>
+                </div>
+                <div className="flex-1">
+                  <h3
+                    className={`font-semibold mb-1 ${
+                      isSelected ? 'text-white' : 'text-primary-200'
+                    }`}
+                  >
+                    {useCase.name}
+                  </h3>
+                  <p className="text-sm text-primary-400">{useCase.description}</p>
+                </div>
+                {isSelected && (
+                  <CheckCircle2 className="w-5 h-5 text-accent-cyan flex-shrink-0" />
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {selectedUseCase && (
+        <div className="mt-4 p-4 bg-primary-900 rounded-lg border border-primary-700">
+          <p className="text-xs text-primary-400 mb-2">AI Prompt:</p>
+          <p className="text-sm text-primary-300 leading-relaxed">
+            {selectedUseCase.prompt}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
