@@ -6,6 +6,7 @@ import json
 import os
 import smtplib
 import time
+import threading
 from datetime import datetime
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -100,12 +101,15 @@ def is_mostly_gray(frame, gray_threshold=0.5, tolerance=10):
         return gray_fraction > gray_threshold
     return False
 
-def load_config():
+def load_config(config_path: str | os.PathLike | None = None):
     """
     Load configuration from config.ini
     """
     config = configparser.ConfigParser()
-    config.read('config.ini')
+    if config_path is None:
+        # Default to config.ini next to this file, so imports work regardless of CWD.
+        config_path = Path(__file__).with_name("config.ini")
+    config.read(str(config_path))
     
     # Parse the contour color from string
     contour_color = tuple(map(int, config.get('Visualization', 'contour_color').split(',')))
@@ -266,7 +270,7 @@ def describe_frames(images: list, prompt_text: str) -> str:
     # Ensure we have at least one image
     if not images:
         return "No frames to describe."
-
+    print(f"Describing {len(images)} frames with prompt: {prompt_text}")
     # Build content: prompt + all frames, each labeled
     content_items = [
         {'type': 'text', 'text': prompt_text}
@@ -455,7 +459,7 @@ def ask_agent_should_alert(description: str) -> bool:
         return ('person' in description.lower() or 'human' in description.lower())
 
 
-def agent_decide_and_send(description: str, frames_bytes: list, image_path: str, timestamp: str, use_case: str = 'motion'):
+def agent_decide_and_send(description: str, frames_bytes: list, image_path: str, timestamp: str, use_case: str = 'motion') -> bool:
     """
     Agent wrapper: delegate decision to the Agent in my_agent.run_motion_agent or run_qa_agent.
     The agent itself will call the send_email_alert_tool if it decides to send an alert.
@@ -469,8 +473,11 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
             sent = run_motion_agent(description, frames_bytes, image_path, timestamp)
         if sent:
             print("Agent decided to send email and email was sent.")
+            return True
         else:
             print("Agent decided NOT to send email.")
+            return False
+        return bool(sent)
     except Exception as e:
         print(f"Agent invocation failed: {e}. Falling back to simple LLM decision.")
         try:
@@ -479,12 +486,15 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
                 from my_agent import send_email_alert_tool
                 send_email_alert_tool(image_path=str(image_path), description=description, timestamp=timestamp, frames_bytes=frames_bytes[:6])
                 print("Fallback: Sent email based on simple LLM/heuristic decision.")
+                return True
             else:
                 print("Fallback: Decided not to send email.")
+                return False
         except Exception as e2:
             print(f"Fallback also failed: {e2}")
+            return False
 
-def run_motion_detection(prompt=''):
+def run_motion_detection(prompt: str = '', stop_event: threading.Event | None = None):
     """
     Main function to run motion detection
     """
@@ -540,6 +550,9 @@ def run_motion_detection(prompt=''):
     
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                print("Stop requested; exiting motion detection loop.")
+                break
             # Read current frame
             ret, frame2 = cap.read()
             if not ret or frame2 is None:
@@ -550,6 +563,9 @@ def run_motion_detection(prompt=''):
                     max_reconnect = 5
                     reconnected = False
                     while reconnect_attempts < max_reconnect:
+                        if stop_event is not None and stop_event.is_set():
+                            print("Stop requested during reconnect; exiting.")
+                            break
                         time.sleep(1)
                         cap.release()
                         cap = cv2.VideoCapture(source)
@@ -561,6 +577,8 @@ def run_motion_detection(prompt=''):
                             break
                         reconnect_attempts += 1
 
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     if not reconnected:
                         print("Reconnect attempts failed; skipping this iteration.")
                         time.sleep(0.5)
@@ -672,13 +690,13 @@ def run_motion_detection(prompt=''):
                         try:
                             # Prepare motion prompt
                             api_config = CONFIG['ai']
-                            motion_prompt = prompt
-                            # motion_prompt = (
-                            #     "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
-                            #     "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
-                            #     "Keep the answer as a single clear paragraph in English.\n\n"
-                            #     + motion_prompt
-                            # )
+                            motion_prompt = ""#prompt
+                            motion_prompt = (
+                                "Say if a person/human is detected in any frame. Specify the frame and how many humans/persons are detected. Give short summary on what they are doing.\n"
+                                "If no person/human is visible in the frames then simply state that no human/person is seen. Don't try to infer that someone is there but not shown.\n"
+                                "Keep the answer as a single clear paragraph in English.\n\n"
+                                + motion_prompt
+                            )
                             description = describe_frames(frames_bytes, motion_prompt)
                         except Exception as e:
                             print(f"AI description failed: {e}")
@@ -705,6 +723,9 @@ def run_motion_detection(prompt=''):
                     cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
                     adjust_camera_settings(cap)
                     for i in range(flush_count):
+                        if stop_event is not None and stop_event.is_set():
+                            print("Stop requested during buffer flush; exiting.")
+                            break
                         ret_flush, _ = cap.read()
                         if not ret_flush:
                             # If flush fails, try reconnecting
@@ -713,6 +734,8 @@ def run_motion_detection(prompt=''):
                             adjust_camera_settings(cap)
                             break
                         time.sleep(0.02)  # Small delay between buffer flushes
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     
                     # Now capture completely fresh frames for next motion detection cycle
                     ret_fresh1, frame1 = cap.read()
@@ -763,12 +786,11 @@ if __name__ == "__main__":
                     #        "The trash bin is covered with a plastic shield. Your role is to detect for each frame if the pins are piling up to an extent that can cause an issue or not. "
                     #        "You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are at normal level, not piling up high'")
                     return ("""
-                            Analyze the provided video frames to determine if the black pins in the clear plastic trash bin (positioned at the bottom center of the image) are piling up high (causing risk of mechanical issues). Use the following criteria:
-                            The pins are piling up high if they exceeds 70 percent of the bin’s vertical height.
-                            Key visual cue: The pile forms a tall, consolidated mass (not scattered) that visually threatens to overflow or obstruct the machine’s operation.
-                            The other case: The pins aren't piling up high if they are below 50 percent of the bin’s height.
-                            Key visual cue: Pins are scattered or form a shallow layer with significant empty space above them.
-                            You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are at normal level, not piling up high'
+                            # Analyze the provided video frames to determine if the black pins in the clear plastic trash bin (positioned at the bottom center of the image) are piling up. Use the following criteria:
+                            # The pins are piling up if there is a clear pile.
+                            # The other case: The pins aren't piling up if ther is no obvious pile for the pins.
+                            # You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up, which is an issue' or 'Pins are at normal level, not piling up'
+                            You should report in JSON foramt with keys being the frame number and values being 'Pins are piling up, which is an issue'
                             """)
                 elif video_use_case == 'bottles':
                     # return ("The frames provided are part of a video showing filled bottles moving on a conveyer belt in a production line. "
@@ -832,11 +854,12 @@ if __name__ == "__main__":
                         save_dir.mkdir(exist_ok=True)
                         frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
                         cv2.imwrite(str(frame_filename), frame)
-                        # Save the frame as a JPEG file
-                        save_dir = Path(CONFIG['save_directory'])
-                        save_dir.mkdir(exist_ok=True)
-                        frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
-                        cv2.imwrite(str(frame_filename), frame)
+                        # # Save the frame as a JPEG file
+                        # save_dir = Path(CONFIG['save_directory'])
+                        # save_dir.mkdir(exist_ok=True)
+                        # frame_filename = save_dir / f"video_segment{segment+1}_frame{frame_num+1}_idx{idx}.jpg"
+                        # cv2.imwrite(str(frame_filename), frame)
+                    print(f"Extracted {len(frames_bytes)} frames for segment {segment+1} (from {start_time:.2f}s to {min(start_time+interval_sec, duration):.2f}s)")
                     if frames_bytes:
                         try:
                             # Prepare video prompt

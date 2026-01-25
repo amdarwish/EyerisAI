@@ -92,13 +92,8 @@ export default function VideoDisplay({
               ) : (
                 <div className="text-center p-8">
                   <Camera className="w-16 h-16 text-red-400 mx-auto mb-4" />
-                  <p className="text-lg font-medium text-gray-800 mb-2">Camera Connection Failed</p>
-                  <p className="text-sm text-red-600 mb-2">{error}</p>
-                  <p className="text-xs text-gray-500">Check camera.json configuration</p>
-                  <div className="mt-4 p-3 bg-gray-100 rounded text-xs text-left">
-                    <p className="font-medium mb-1">Current URL:</p>
-                    <p className="font-mono text-gray-600">{config.camera.ip_url}</p>
-                  </div>
+                  <p className="text-lg font-medium text-gray-800 mb-2">Live Streaming on link below</p>
+                  <p className="text-xs text-gray-500">{config.camera.ip_url}</p>
                 </div>
               )
             ) : (

@@ -12,9 +12,11 @@ import io
 import base64
 import tempfile
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from fastapi import Body
 
 import cv2
 import uvicorn
@@ -24,17 +26,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-# Import your existing modules
-from EyerisAI import (
-    load_config,
-    detect_motion,
-    describe_frames,
-    count_items,
-    agent_decide_and_send,
-    run_motion_detection,
-    CONFIG,
-)
-from my_agent import run_motion_agent, run_qa_agent
+# Import your existing modules (support running from repo root or from within `backend/`)
+try:
+    from backend.EyerisAI import (  # type: ignore
+        load_config,
+        detect_motion,
+        describe_frames,
+        count_items,
+        agent_decide_and_send,
+        run_motion_detection,
+        CONFIG,
+    )
+    from backend.my_agent import run_motion_agent, run_qa_agent  # type: ignore
+except Exception:
+    from EyerisAI import (  # type: ignore
+        load_config,
+        detect_motion,
+        describe_frames,
+        count_items,
+        agent_decide_and_send,
+        run_motion_detection,
+        CONFIG,
+    )
+    from my_agent import run_motion_agent, run_qa_agent  # type: ignore
 
 app = FastAPI(
     title="EyerisAI API",
@@ -98,6 +112,7 @@ class SystemStatusResponse(BaseModel):
 # Global variables for motion detection state
 motion_detection_active = False
 motion_detection_task = None
+motion_stop_event: threading.Event | None = None
 
 
 @app.on_event("startup")
@@ -112,9 +127,11 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    global motion_detection_active, motion_detection_task
+    global motion_detection_active, motion_detection_task, motion_stop_event
     if motion_detection_active and motion_detection_task:
         motion_detection_active = False
+        if motion_stop_event is not None:
+            motion_stop_event.set()
         motion_detection_task.cancel()
 
 
@@ -177,7 +194,7 @@ async def get_system_status():
 @app.post("/motion/start")
 async def start_motion_detection(background_tasks: BackgroundTasks):
     """Start continuous motion detection"""
-    global motion_detection_active, motion_detection_task
+    global motion_detection_active, motion_detection_task, motion_stop_event
 
     # Print the equivalent terminal command
     print("\n" + "="*60)
@@ -195,13 +212,14 @@ async def start_motion_detection(background_tasks: BackgroundTasks):
 
     try:
         motion_detection_active = True
+        motion_stop_event = threading.Event()
 
         # Start motion detection in background
         async def motion_detection_worker():
             try:
                 # This would run your existing motion detection loop
                 # For now, we'll use a simplified version
-                await asyncio.to_thread(run_motion_detection)
+                await asyncio.to_thread(run_motion_detection, "", motion_stop_event)
             except Exception as e:
                 print(f"Motion detection error: {e}")
                 global motion_detection_active
@@ -227,7 +245,7 @@ async def start_motion_detection(background_tasks: BackgroundTasks):
 @app.post("/motion/stop")
 async def stop_motion_detection():
     """Stop continuous motion detection"""
-    global motion_detection_active, motion_detection_task
+    global motion_detection_active, motion_detection_task, motion_stop_event
 
     # Print the equivalent terminal command
     print("\n" + "="*60)
@@ -245,6 +263,8 @@ async def stop_motion_detection():
 
     try:
         motion_detection_active = False
+        if motion_stop_event is not None:
+            motion_stop_event.set()
         if motion_detection_task:
             motion_detection_task.cancel()
 
@@ -344,147 +364,165 @@ async def detect_motion_single(file: UploadFile = File(...)):
 
 @app.post("/video/analyze", response_model=VideoAnalysisResponse)
 async def analyze_video(
-    file: UploadFile = File(...),
-    use_case: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    use_case: Optional[str] = Form(None),
     n_frames: int = Form(3),
     interval: float = Form(10.0),
+    json_payload: Optional[VideoAnalysisRequest] = Body(None),
 ):
-    """Analyze uploaded video for trash bin status or production line anomalies"""
+    """
+    Analyze uploaded video for trash bin status or production line anomalies.
+    Supports BOTH multipart/form-data and JSON payloads.
+    """
+
     try:
+        # ----------------------------
+        # Normalize inputs
+        # ----------------------------
+        if json_payload:
+            use_case = json_payload.use_case
+            n_frames = json_payload.n_frames
+            interval = json_payload.interval
+
+        if not use_case:
+            raise HTTPException(
+                status_code=400,
+                detail="use_case is required (trash or bottles)",
+            )
+
         if use_case not in ["trash", "bottles"]:
             raise HTTPException(
-                status_code=400, detail="use_case must be 'trash' or 'bottles'"
+                status_code=400,
+                detail="use_case must be 'trash' or 'bottles'",
+            )
+
+        if file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Video file is required for analysis",
             )
 
         if not file.content_type.startswith("video/"):
-            raise HTTPException(status_code=400, detail="File must be a video")
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file must be a video",
+            )
 
-        # Save uploaded video to temporary file
+        # ----------------------------
+        # Save uploaded video
+        # ----------------------------
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
             contents = await file.read()
             tmp_file.write(contents)
             video_path = tmp_file.name
 
+        print(
+            f"Video analysis started | use_case={use_case}, "
+            f"frames={n_frames}, interval={interval}s"
+        )
+
         try:
-            # Extract frames from video
+            # ----------------------------
+            # Extract frames
+            # ----------------------------
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                raise HTTPException(status_code=400, detail="Could not open video file")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not open uploaded video",
+                )
 
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            duration = total_frames / fps if fps > 0 else 0
+            fps = cap.get(cv2.CAP_PROP_FPS) or 1.0
+            duration = total_frames / fps
 
             frames = []
-            frame_indices = []
 
-            if interval > 0 and duration > 0:
-                # Extract frames at specified intervals
-                for i in range(n_frames):
-                    timestamp_sec = (
-                        (i * interval) if interval > 0 else (i * duration / n_frames)
-                    )
-                    frame_number = int(timestamp_sec * fps)
-                    frame_indices.append(min(frame_number, total_frames - 1))
-            else:
-                # Extract frames evenly distributed
-                for i in range(n_frames):
-                    frame_number = int(i * total_frames / n_frames)
-                    frame_indices.append(frame_number)
-
-            for frame_idx in frame_indices:
+            for i in range(n_frames):
+                t = min(i * interval, duration)
+                frame_idx = int(t * fps)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 ret, frame = cap.read()
                 if ret:
-                    success, img_bytes = cv2.imencode(".jpg", frame)
-                    if success:
-                        frames.append(img_bytes.tobytes())
+                    ok, jpg = cv2.imencode(".jpg", frame)
+                    if ok:
+                        frames.append(jpg.tobytes())
 
             cap.release()
 
             if not frames:
                 raise HTTPException(
-                    status_code=400, detail="Could not extract frames from video"
+                    status_code=400,
+                    detail="No frames could be extracted from video",
                 )
 
-            # Generate analysis prompt based on use case (hardcoded prompts)
+            # ----------------------------
+            # Prompts
+            # ----------------------------
             if use_case == "trash":
-                prompt = "The frames provided are part of a video showing a machine in a lab that uses solid thin pins then dispenses them in the trash bin located in the bottom of the images.The trash bin is covered with a plastic shield. Your role is to detect for each frame if the pins are piling up to an extent that can cause an issue or not. You should report in JSON format with keys being the frame number and values being 'Pins are piling up high, they can fall out of the bin, which is an issue' or 'Pins are at normal level, not piling up high'"
-            elif use_case == "bottles":
-                prompt = "The frames provided are part of a video showing filled bottles moving on a conveyer belt in a production line. Bottles being produced are passed from the left to the right of the image. In the middle of the image there is a metallic vertical tube with horizontal separator, where according to the flow, bottles are expected to be on the left side of the horizontal separator. From the angle where the camera is placed, bottles shouldn't be infront of the horizontal separator. In some cases, one or few bottles could be pushed to the right of the horizontal separator in their flow,  which according to the camera angle is infront of the horizontal separator. You will need to report if you see any bottle seen to the right of the horizontal separator in the flow, which according to the camera angle will be seen is infront of the horizontal separator. If no bottles are spotted right of the horizontal separator then state that all bottles are normally located left of the horizontal separator. You should report in JSON format with keys being the frame number and values being 'bottle or more are pushed to the wrong position, which is an issue' or 'the bottles are in the normal position.'. Keep the answer strictly in JSON format and nothing else."
+                prompt = (
+                    "Analyze the frames and determine if pins are piling up "
+                    "into a tall consolidated mass (issue) or remain scattered "
+                    "at normal levels. Return JSON only."
+                )
             else:
-                prompt = "Analyze the video frames and describe what you observe."
+                prompt = (
+                    "Detect whether any bottle appears in front of the horizontal "
+                    "separator (anomaly) or all bottles remain behind it (normal). "
+                    "Return JSON only."
+                )
 
-            # Analyze frames using AI
-            analysis = await asyncio.to_thread(describe_frames, frames, prompt)
+            # ----------------------------
+            # AI Analysis
+            # ----------------------------
+            analysis = await asyncio.to_thread(
+                describe_frames, frames, prompt
+            )
 
-            # Use appropriate agent for decision making
             timestamp = datetime.now().isoformat()
             save_path = (
                 Path(CONFIG["save_directory"])
                 / f"{use_case}_{timestamp.replace(':', '-')}.jpg"
             )
 
-            # Save first frame as reference
-            if frames:
-                with open(save_path, "wb") as f:
-                    f.write(frames[0])
+            with open(save_path, "wb") as f:
+                f.write(frames[0])
 
-            # Decide if alert should be sent based on use case
             alert_sent = False
             try:
-                if use_case == "trash":
-                    alert_sent = await asyncio.to_thread(
-                        agent_decide_and_send,
-                        analysis,
-                        frames,
-                        str(save_path),
-                        timestamp,
-                        "qa",  # Use QA agent for trash analysis
-                    )
-                else:  # bottles
-                    alert_sent = await asyncio.to_thread(
-                        agent_decide_and_send,
-                        analysis,
-                        frames,
-                        str(save_path),
-                        timestamp,
-                        "qa",  # Use QA agent for production line analysis
-                    )
+                alert_sent = await asyncio.to_thread(
+                    agent_decide_and_send,
+                    analysis,
+                    frames,
+                    str(save_path),
+                    timestamp,
+                    "qa",
+                )
             except Exception as e:
-                print(f"Agent decision error (continuing without alert): {e}")
-                alert_sent = False
-
-            # Print completion status
-            print("\n" + "="*60)
-            print("✅ VIDEO ANALYSIS COMPLETED")
-            print("="*60)
-            print(f"🔍 Frames Analyzed: {len(frames)}")
-            print(f"📊 Analysis Result: {analysis[:100]}..." if len(analysis) > 100 else f"📊 Analysis Result: {analysis}")
-            print(f"⚠️  Alert Status: {'ALERT TRIGGERED' if alert_sent else 'Normal - No Issues'}")
-            if alert_sent:
-                print("📧 Email Alert: Sent to configured recipients")
-            print("="*60 + "\n")
+                print(f"Agent error (non-blocking): {e}")
 
             return VideoAnalysisResponse(
                 success=True,
-                message=f"Video analysis completed for {use_case} use case",
+                message=f"Video analysis completed for {use_case}",
                 analysis=analysis,
-                alert_sent=bool(alert_sent),  # Ensure boolean
+                alert_sent=bool(alert_sent),
                 timestamp=timestamp,
                 frames_analyzed=len(frames),
             )
 
         finally:
-            # Clean up temporary file
             try:
                 os.unlink(video_path)
-            except:
+            except Exception:
                 pass
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Video analysis failed: {str(e)}")
-
+        raise HTTPException(
+            status_code=500,
+            detail=f"Video analysis failed: {str(e)}",
+        )
 
 @app.post("/count/items", response_model=ItemCountResponse)
 async def count_items_endpoint(
