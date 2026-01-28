@@ -467,10 +467,10 @@ def agent_decide_and_send(description: str, frames_bytes: list, image_path: str,
     use_case: 'motion' or 'qa'
     """
     try:
-        if use_case == 'qa':
-            sent = run_qa_agent(description, frames_bytes, image_path, timestamp)
-        else:
+        if use_case == 'motion':
             sent = run_motion_agent(description, frames_bytes, image_path, timestamp)
+        else:
+            sent = run_qa_agent(description, frames_bytes, image_path, timestamp)
         if sent:
             print("Agent decided to send email and email was sent.")
             return True

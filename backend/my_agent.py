@@ -232,9 +232,12 @@ import logging
 import requests
 
 # Local lightweight config loader to avoid circular imports with EyerisAI
-def load_config_local():
+def load_config_local(config_path: str | os.PathLike | None = None):
     config = configparser.ConfigParser()
-    config.read('config.ini')
+    if config_path is None:
+        # Default to config.ini next to this file, so imports work regardless of CWD.
+        config_path = Path(__file__).with_name("config.ini")
+    config.read(str(config_path))
     return {
         'instance_name': config.get('General', 'instance_name', fallback='Motion Detector'),
         'ai': {

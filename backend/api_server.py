@@ -5,6 +5,9 @@ Provides REST API endpoints for the three use cases:
 1. Motion Detection (Restricted Area Access)
 2. Trash Bin Status Analysis
 3. Production Line Anomaly (Bottles)
+4. Helmet
+5. Bed
+6. Tube
 """
 
 import os
@@ -82,7 +85,7 @@ class MotionDetectionResponse(BaseModel):
 
 
 class VideoAnalysisRequest(BaseModel):
-    use_case: str  # 'trash' or 'bottles'
+    use_case: str  # 'trash', 'bottles', 'helmet', 'bed', or 'tube'
     n_frames: int = 3
     interval: float = 10.0
 
@@ -368,7 +371,7 @@ async def analyze_video(
     use_case: Optional[str] = Form(None),
     n_frames: int = Form(3),
     interval: float = Form(10.0),
-    json_payload: Optional[VideoAnalysisRequest] = Body(None),
+    # json_payload: Optional[VideoAnalysisRequest] = Body(None),
 ):
     """
     Analyze uploaded video for trash bin status or production line anomalies.
@@ -376,24 +379,23 @@ async def analyze_video(
     """
 
     try:
-        # ----------------------------
-        # Normalize inputs
-        # ----------------------------
-        if json_payload:
-            use_case = json_payload.use_case
-            n_frames = json_payload.n_frames
-            interval = json_payload.interval
+        print("In the video analysis endpoint")
+
+        # if json_payload:
+        #     use_case = json_payload.use_case
+        #     n_frames = json_payload.n_frames
+        #     interval = json_payload.interval
 
         if not use_case:
             raise HTTPException(
                 status_code=400,
-                detail="use_case is required (trash or bottles)",
+                detail="use_case is required (trash, bottles, helmet, bed or tube)",
             )
 
-        if use_case not in ["trash", "bottles"]:
+        if use_case not in ["trash", "bottles", "helmet", "bed", "tube"]:
             raise HTTPException(
                 status_code=400,
-                detail="use_case must be 'trash' or 'bottles'",
+                detail="use_case must be 'trash', 'bottles', 'helmet', 'bed', or 'tube'",
             )
 
         if file is None:
@@ -435,11 +437,12 @@ async def analyze_video(
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 1.0
             duration = total_frames / fps
-
+            if interval > duration:
+                interval = duration
             frames = []
 
             for i in range(n_frames):
-                t = min(i * interval, duration)
+                t = min(float(i) * float(interval) / float(n_frames), duration)
                 frame_idx = int(t * fps)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 ret, frame = cap.read()
@@ -463,13 +466,31 @@ async def analyze_video(
                 prompt = (
                     "Analyze the frames and determine if pins are piling up "
                     "into a tall consolidated mass (issue) or remain scattered "
-                    "at normal levels. Return JSON only."
+                    "at normal levels. Return JSON only. Indicating frame index as a key and status as value."
                 )
-            else:
+            elif use_case == "bottles":
                 prompt = (
                     "Detect whether any bottle appears in front of the horizontal "
                     "separator (anomaly) or all bottles remain behind it (normal). "
-                    "Return JSON only."
+                    "Return JSON only. Indicating frame index as a key and status as value."
+                )
+            elif use_case == "helmet":
+                prompt = (
+                    "Detect whether the person is wearing a helmet over his head. "
+                    "Not wearing, need to report the issue or wearing which is normal. "
+                    "Return JSON only. Indicating frame index as a key and status as value."
+                )
+            elif use_case == "bed":
+                prompt = (
+                    "Detect whether the person is lying on the bed or fell down. "
+                    "Fell down is an issue that needs to be reported, lying on bed is normal. "
+                    "Return JSON only. Indicating frame index as a key and status as value."
+                )
+            elif use_case == "tube":
+                prompt = (
+                    "Detect whether the dispenser touched the tube or not."
+                    "If it touched it is an issue that needs to be reported, if it didn't touch then it is normal. "
+                    "Return JSON only. Indicating frame index as a key and status as value."
                 )
 
             # ----------------------------
@@ -496,7 +517,7 @@ async def analyze_video(
                     frames,
                     str(save_path),
                     timestamp,
-                    "qa",
+                    use_case,
                 )
             except Exception as e:
                 print(f"Agent error (non-blocking): {e}")
@@ -603,7 +624,7 @@ if __name__ == "__main__":
     print("  - POST /motion/start - Start motion detection")
     print("  - POST /motion/stop - Stop motion detection")
     print("  - POST /motion/detect - Analyze single image for motion")
-    print("  - POST /video/analyze - Analyze video (trash/bottles)")
+    print("  - POST /video/analyze - Analyze video (trash/bottles/helmet/bed/tube)")
     print("  - POST /count/items - Count items in image")
     print("  - GET  /logs - Get recent logs")
     print("\nServer will be available at: http://localhost:8000")

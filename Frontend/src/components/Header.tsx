@@ -9,12 +9,12 @@ export default function Header() {
         <div className="flex items-center justify-center w-14 h-14 bg-white rounded-2xl shadow-lg border border-gray-100">
           <img 
             src={logo} 
-            alt="AbuVision Logo" 
+            alt="OcchioAI Logo" 
             className="w-10 h-10 object-contain"
           />
         </div>
         <div>
-          <h1 className="text-4xl font-bold text-gray-800">AbuVision</h1>
+          <h1 className="text-4xl font-bold text-gray-800">OcchioAI</h1>
         </div>
       </div>
     </div>
