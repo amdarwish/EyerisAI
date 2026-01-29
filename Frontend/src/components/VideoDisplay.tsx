@@ -1,6 +1,7 @@
-import { Video, Camera, Upload, X } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import { useCameraConfig } from '../hooks/useCameraConfig';
+import { Video, Camera, Upload, X, VideoOff, Laptop, Globe, Settings } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+
+type CameraSource = 'builtin' | 'external';
 
 interface VideoDisplayProps {
   mode: 'live' | 'demo';
@@ -17,10 +18,99 @@ export default function VideoDisplay({
   videoFile,
   onVideoFileChange,
   isProcessing,
-  selectedUseCase,
 }: VideoDisplayProps) {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const { config, isConnected, error } = useCameraConfig();
+  const [webcamError, setWebcamError] = useState<string | null>(null);
+  const [webcamActive, setWebcamActive] = useState(false);
+  const [cameraSource, setCameraSource] = useState<CameraSource>('builtin');
+  const [externalUrl, setExternalUrl] = useState<string>('');
+  const [showCameraSettings, setShowCameraSettings] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const startWebcam = async () => {
+    try {
+      setWebcamError(null);
+      setWebcamActive(false);
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+
+      streamRef.current = stream;
+
+      // Wait a tick for the video element to be in the DOM
+      setTimeout(() => {
+        if (videoRef.current && streamRef.current) {
+          videoRef.current.srcObject = streamRef.current;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current?.play();
+            setWebcamActive(true);
+          };
+        }
+      }, 100);
+    } catch (err) {
+      console.error('Webcam error:', err);
+      setWebcamError(
+        err instanceof Error
+          ? err.message
+          : 'Failed to access webcam. Please allow camera permissions.'
+      );
+      setWebcamActive(false);
+    }
+  };
+
+  const connectExternalCamera = () => {
+    if (!externalUrl.trim()) {
+      setWebcamError('Please enter a valid camera URL');
+      return;
+    }
+    setWebcamError(null);
+    setWebcamActive(true);
+  };
+
+  // Handle camera for live mode
+  useEffect(() => {
+    if (mode === 'live') {
+      if (cameraSource === 'builtin') {
+        // Small delay to ensure component is mounted
+        const timer = setTimeout(() => {
+          startWebcam();
+        }, 200);
+        return () => clearTimeout(timer);
+      } else {
+        // External camera - stop any webcam stream
+        stopWebcam();
+        if (externalUrl.trim()) {
+          setWebcamActive(true);
+        }
+      }
+    } else {
+      stopWebcam();
+      setWebcamActive(false);
+    }
+
+    return () => {
+      if (cameraSource === 'builtin') {
+        stopWebcam();
+      }
+    };
+  }, [mode, cameraSource]);
+
+  const stopWebcam = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setWebcamActive(false);
+  };
 
   // Create video URL when file is selected
   useEffect(() => {
@@ -78,34 +168,123 @@ export default function VideoDisplay({
         </div>
       </div>
 
-      <div className="aspect-video bg-gradient-to-br from-gray-50 to-gray-100 relative flex items-center justify-center">
-        {mode === 'live' ? (
-          <div className="w-full h-full flex items-center justify-center">
-            {config.camera.enabled && config.camera.ip_url ? (
-              isConnected ? (
-                <img
-                  src={config.camera.ip_url}
-                  alt="Live Camera Stream"
-                  className="w-full h-full object-contain"
-                  style={{ maxWidth: config.display.max_width }}
+      {/* Camera Settings Panel for Live Mode */}
+      {mode === 'live' && (
+        <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <div className="flex items-center gap-4 flex-wrap">
+            <span className="text-sm font-medium text-gray-700">Camera Source:</span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCameraSource('builtin')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                  cameraSource === 'builtin'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Laptop className="w-4 h-4" />
+                Built-in Webcam
+              </button>
+              <button
+                onClick={() => setCameraSource('external')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                  cameraSource === 'external'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Globe className="w-4 h-4" />
+                External IP Camera
+              </button>
+            </div>
+
+            {cameraSource === 'external' && (
+              <div className="flex items-center gap-2 flex-1 min-w-[300px]">
+                <input
+                  type="text"
+                  value={externalUrl}
+                  onChange={(e) => setExternalUrl(e.target.value)}
+                  placeholder="http://192.168.1.100:8080/video"
+                  className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
-              ) : (
+                <button
+                  onClick={connectExternalCamera}
+                  className="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  Connect
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="aspect-video bg-gradient-to-br from-gray-900 to-gray-800 relative flex items-center justify-center">
+        {mode === 'live' ? (
+          <div className="w-full h-full relative">
+            {/* Built-in webcam video element */}
+            {cameraSource === 'builtin' && (
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-contain ${webcamActive ? 'block' : 'hidden'}`}
+              />
+            )}
+
+            {/* External IP camera image/stream */}
+            {cameraSource === 'external' && webcamActive && externalUrl && (
+              <img
+                src={externalUrl}
+                alt="External Camera Stream"
+                className="w-full h-full object-contain"
+                onError={() => setWebcamError('Failed to load external camera stream. Check the URL.')}
+              />
+            )}
+
+            {/* Error state */}
+            {webcamError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-80">
                 <div className="text-center p-8">
-                  <Camera className="w-16 h-16 text-red-400 mx-auto mb-4" />
-                  <p className="text-lg font-medium text-gray-800 mb-2">Live Streaming on link below</p>
-                  <p className="text-xs text-gray-500">{config.camera.ip_url}</p>
+                  <VideoOff className="w-16 h-16 text-red-400 mx-auto mb-4" />
+                  <p className="text-lg font-medium text-white mb-2">Camera Error</p>
+                  <p className="text-sm text-gray-300 mb-4">{webcamError}</p>
+                  <button
+                    onClick={() => cameraSource === 'builtin' ? startWebcam() : connectExternalCamera()}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                  >
+                    Try Again
+                  </button>
                 </div>
-              )
-            ) : (
-              <div className="text-center p-8">
-                <Camera className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-                <p className="text-lg font-medium text-gray-800 mb-2">Camera Not Configured</p>
-                <p className="text-sm text-gray-600 mb-4">{config.camera.fallback_message}</p>
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-left">
-                  <p className="text-sm font-medium text-blue-800 mb-2">📝 Configuration:</p>
-                  <p className="text-xs text-blue-700 font-mono">Frontend/src/config/camera.json</p>
-                  <p className="text-xs text-blue-600 mt-1">Update the ip_url field with your camera stream</p>
+              </div>
+            )}
+
+            {/* Loading state */}
+            {!webcamActive && !webcamError && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="text-center p-8">
+                  <Camera className="w-16 h-16 text-blue-400 mx-auto mb-4 animate-pulse" />
+                  <p className="text-lg font-medium text-white mb-2">
+                    {cameraSource === 'builtin' ? 'Connecting to Webcam...' : 'Enter Camera URL Above'}
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    {cameraSource === 'builtin'
+                      ? 'Please allow camera access when prompted'
+                      : 'Enter the IP camera URL and click Connect'}
+                  </p>
                 </div>
+              </div>
+            )}
+
+            {/* Live indicator */}
+            {webcamActive && !webcamError && (
+              <div className="absolute top-4 left-4 flex items-center gap-2 bg-black bg-opacity-60 px-3 py-1.5 rounded-lg">
+                <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse"></span>
+                <span className="text-white text-sm font-medium">LIVE</span>
+                <span className="text-gray-400 text-xs ml-2">
+                  {cameraSource === 'builtin' ? 'Webcam' : 'IP Camera'}
+                </span>
               </div>
             )}
           </div>
