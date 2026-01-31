@@ -42,12 +42,14 @@ function App() {
   useEffect(() => {
     if (mode === 'live') {
       // Auto-select security use case for live stream
-      const securityUseCase = {
+      const securityUseCase: UseCase = {
         id: 'restricted-area',
-        name: 'Security',
-        description: 'Detects unauthorized access to restricted areas using motion detection for security monitoring',
+        name: 'Security Monitoring',
+        category: 'Security',
+        description: 'Detects unauthorized access to restricted areas using motion detection for real-time security monitoring',
         icon: 'motion' as const,
         prompt: 'Monitor for unauthorized access to restricted areas. Detect any person or movement that indicates potential security breach.',
+        backendValue: 'motion',
       };
       setSelectedUseCase(securityUseCase);
       
@@ -163,42 +165,41 @@ function App() {
         }
         
       } else {
-        // Process uploaded video for trash status or production anomaly
+        // Process uploaded video with selected use case
         if (!videoFile || !selectedUseCase) {
           throw new Error('Video file and use case are required');
         }
-        
-        // Log the backend command that would be equivalent
-        const nFrames = selectedUseCase.id === 'trash-status' ? '3' : '4';
-        const interval = selectedUseCase.id === 'trash-status' ? '5.0' : 
-                        selectedUseCase.id === 'production-anomaly' ? '2.0' : '10.0';
-        
+
+        // Get the backend value from the use case
+        const videoUseCase = selectedUseCase.backendValue;
+
+        // Set parameters based on use case
+        const useCaseParams: Record<string, { nFrames: string; interval: string }> = {
+          bottles: { nFrames: '3', interval: '10.0' },
+          bed: { nFrames: '3', interval: '10.0' },
+          helmet: { nFrames: '3', interval: '10.0' },
+          tube: { nFrames: '3', interval: '10.0' },
+        };
+
+        const params = useCaseParams[videoUseCase] || { nFrames: '3', interval: '10.0' };
+
         console.log('\n' + '='.repeat(60));
         console.log('🎥 STARTING VIDEO ANALYSIS');
         console.log('='.repeat(60));
         console.log('📋 Terminal Command Equivalent:');
-        console.log(`   python backend/EyerisAI.py --use-case video --video "${videoFile.name}" --n-frames ${nFrames} --interval ${interval}`);
+        console.log(`   python backend/EyerisAI.py --use-case video --video-use-case ${videoUseCase} --video "${videoFile.name}" --n-frames ${params.nFrames} --interval ${params.interval}`);
         console.log('📍 API Endpoint: POST /video/analyze');
-        console.log(`🎯 Use Case: ${selectedUseCase.id === 'trash-status' ? 'Trash Monitoring' : 'Production Line Monitoring'}`);
-        console.log(`📊 Parameters: n_frames=${nFrames}, interval=${interval}`);
+        console.log(`🎯 Use Case: ${selectedUseCase.name} [${selectedUseCase.category}]`);
+        console.log(`📊 Backend Value: ${videoUseCase}`);
+        console.log(`📊 Parameters: n_frames=${params.nFrames}, interval=${params.interval}`);
         console.log('='.repeat(60));
         console.log('📤 Sending video analysis request to backend...');
-        
+
         const formData = new FormData();
         formData.append('file', videoFile);
-        formData.append('use_case', selectedUseCase.id === 'trash-status' ? 'trash' : 'bottles');
-        
-        // Set appropriate parameters based on use case
-        if (selectedUseCase.id === 'trash-status') {
-          formData.append('n_frames', '3');
-          formData.append('interval', '5.0');
-        } else if (selectedUseCase.id === 'production-anomaly') {
-          formData.append('n_frames', '4');
-          formData.append('interval', '2.0');
-        } else {
-          formData.append('n_frames', '4');
-          formData.append('interval', '10.0');
-        }
+        formData.append('use_case', videoUseCase);
+        formData.append('n_frames', params.nFrames);
+        formData.append('interval', params.interval);
         
         const response = await fetch(`${API_BASE_URL}/video/analyze`, {
           method: 'POST',
