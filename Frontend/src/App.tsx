@@ -175,13 +175,13 @@ function App() {
 
         // Set parameters based on use case
         const useCaseParams: Record<string, { nFrames: string; interval: string }> = {
-          bottles: { nFrames: '4', interval: '2.0' },
-          bed: { nFrames: '5', interval: '3.0' },
-          helmet: { nFrames: '4', interval: '2.5' },
-          tube: { nFrames: '6', interval: '2.0' },
+          bottles: { nFrames: '3', interval: '10.0' },
+          bed: { nFrames: '3', interval: '10.0' },
+          helmet: { nFrames: '3', interval: '10.0' },
+          tube: { nFrames: '3', interval: '10.0' },
         };
 
-        const params = useCaseParams[videoUseCase] || { nFrames: '4', interval: '3.0' };
+        const params = useCaseParams[videoUseCase] || { nFrames: '3', interval: '10.0' };
 
         console.log('\n' + '='.repeat(60));
         console.log('🎥 STARTING VIDEO ANALYSIS');

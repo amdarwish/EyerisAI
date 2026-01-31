@@ -640,51 +640,51 @@ def run_motion_detection(prompt: str = '', stop_event: threading.Event | None = 
                     # mean-difference threshold for accepting a new frame (tunable)
                     diff_threshold = 5.0
 
-                    # for i in range(max(0, n_frames - 1)):
-                    #     start_poll = time.time()
-                    #     captured = False
-                    #     candidate = None
+                    for i in range(max(0, n_frames - 1)):
+                        start_poll = time.time()
+                        captured = False
+                        candidate = None
 
-                    #     # Poll until we find a sufficiently different frame or we exceed frames_interval
-                    #     while time.time() - start_poll < frames_interval:
-                    #         ret_extra, candidate = cap.read()
-                    #         if not ret_extra or candidate is None:
-                    #             # Try a quick reconnect single attempt and continue polling
-                    #             cap.release()
-                    #             cap = cv2.VideoCapture(source)
-                    #             adjust_camera_settings(cap)
-                    #             ret_extra, candidate = cap.read()
-                    #             if not ret_extra or candidate is None:
-                    #                 time.sleep(0.05)
-                    #                 continue
+                        # Poll until we find a sufficiently different frame or we exceed frames_interval
+                        while time.time() - start_poll < frames_interval:
+                            ret_extra, candidate = cap.read()
+                            if not ret_extra or candidate is None:
+                                # Try a quick reconnect single attempt and continue polling
+                                cap.release()
+                                cap = cv2.VideoCapture(source)
+                                adjust_camera_settings(cap)
+                                ret_extra, candidate = cap.read()
+                                if not ret_extra or candidate is None:
+                                    time.sleep(0.5)
+                                    continue
 
-                    #         try:
-                    #             gray_last = cv2.cvtColor(last_captured_frame, cv2.COLOR_BGR2GRAY)
-                    #             gray_cand = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
-                    #             mean_diff = float(np.mean(cv2.absdiff(gray_cand, gray_last)))
-                    #         except Exception:
-                    #             mean_diff = 255.0
+                            try:
+                                gray_last = cv2.cvtColor(last_captured_frame, cv2.COLOR_BGR2GRAY)
+                                gray_cand = cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY)
+                                mean_diff = float(np.mean(cv2.absdiff(gray_cand, gray_last)))
+                            except Exception:
+                                mean_diff = 255.0
 
-                    #         if mean_diff > diff_threshold:
-                    #             captured = True
-                    #             break
-                    #         # small sleep to avoid tight loop
-                    #         time.sleep(0.05)
+                            if mean_diff > diff_threshold:
+                                captured = True
+                                break
+                            # small sleep to avoid tight loop
+                            time.sleep(0.5)
 
-                    #     if not captured:
-                    #         # fallback: if we read any candidate frame use it, else skip
-                    #         if candidate is None:
-                    #             print(f"Warning: failed to capture extra frame {i+1}; skipping")
-                    #             continue
-                    #         else:
-                    #             frame_extra = candidate
-                    #     else:
-                    #         frame_extra = candidate
+                        if not captured:
+                            # fallback: if we read any candidate frame use it, else skip
+                            if candidate is None:
+                                print(f"Warning: failed to capture extra frame {i+1}; skipping")
+                                continue
+                            else:
+                                frame_extra = candidate
+                        else:
+                            frame_extra = candidate
 
-                    #     # Append encoded JPEG bytes and update last_captured_frame for next iteration
-                    #     _, jpg = cv2.imencode('.jpg', frame_extra)
-                    #     frames_bytes.append(jpg.tobytes())
-                    #     last_captured_frame = frame_extra.copy()
+                        # Append encoded JPEG bytes and update last_captured_frame for next iteration
+                        _, jpg = cv2.imencode('.jpg', frame_extra)
+                        frames_bytes.append(jpg.tobytes())
+                        last_captured_frame = frame_extra.copy()
 
                     if CONFIG['ai_description']:
                         try:
